@@ -7,9 +7,9 @@ import { computerStuffData } from './src/data/computerStuff.js';
 // --- Firebase Configuration ---
 const firebaseConfig = {
   apiKey: "YOUR_API_KEY",
-  authDomain: "question-word-platform.firebaseapp.com",
-  projectId: "question-word-platform",
-  storageBucket: "question-word-platform.appspot.com",
+  authDomain: "englishmaster-ea9b9.firebaseapp.com",
+  projectId: "englishmaster-ea9b9",
+  storageBucket: "englishmaster-ea9b9.appspot.com",
   messagingSenderId: "YOUR_SENDER_ID",
   appId: "YOUR_APP_ID"
 };
