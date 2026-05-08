@@ -36,6 +36,9 @@ const state = {
   timeLeft: 30,
   timerId: null,
   isSurvivor: false,
+  survivorTier: 'bronze',
+  shields: 0,
+  lastQuestionStartTime: 0,
   userStats: {
     xp: 0,
     level: 1,
@@ -245,8 +248,13 @@ function renderQuiz() {
       </div>
       
       ${state.isSurvivor ? `
-        <div class="timer-display ${state.timeLeft < 10 ? 'low-time' : ''}">
-          <span class="timer-icon">⏳</span> <span id="timer-seconds">${state.timeLeft}s</span>
+        <div class="survivor-header-stats">
+          <div class="timer-display ${state.timeLeft < 10 ? 'low-time' : ''} tier-${state.survivorTier}">
+            <span class="timer-icon">⏳</span> <span id="timer-seconds">${state.timeLeft}s</span>
+          </div>
+          <div class="shield-display ${state.shields > 0 ? 'has-shields' : ''}">
+            🛡️ x${state.shields}
+          </div>
         </div>
       ` : ''}
 
@@ -255,8 +263,12 @@ function renderQuiz() {
         <div class="progress-bar-wrap">
           <div class="progress-bar-fill" style="width: ${progress}%"></div>
         </div>
-        <div class="score-display">${state.isSurvivor ? 'RECORD' : 'PONTOS'}: ${state.score}</div>
+        <div class="score-display">
+          ${state.isSurvivor ? `NÍVEL: ${state.survivorTier.toUpperCase()}` : `PONTOS: ${state.score}`}
+        </div>
       </div>
+      
+      ${state.isSurvivor ? `<div class="survivor-score-overlay">${state.score}</div>` : ''}
 
       <div class="question-box">
         <div class="difficulty-tag ${state.currentDifficulty}">${state.currentDifficulty.toUpperCase()}</div>
@@ -275,7 +287,9 @@ function renderQuiz() {
       ${state.isAnswered ? `
         <div class="feedback-area">
           <span class="feedback-title ${state.selectedAnswer === question.answer ? 'text-success' : 'text-error'}">
-            ${state.selectedAnswer === question.answer ? '✨ Correto! ' + (state.isSurvivor ? '+5s' : '') : '❌ Incorreto'}
+            ${state.selectedAnswer === question.answer 
+              ? (state.isSurvivor && (Date.now() - state.lastQuestionStartTime < 3000) ? '⚡ VELOZ! +7s' : '✨ Correto! ' + (state.isSurvivor ? '+5s' : ''))
+              : (state.isSurvivor && state.shields > 0 ? '🛡️ ESCUDO USADO!' : '❌ Incorreto')}
           </span>
           <p class="feedback-text">${question.explanation}</p>
           <button class="next-btn" onclick="window.nextQuestion()">
@@ -356,6 +370,16 @@ function getAllQuestions() {
   return [...questionWordsData, ...verbToBeData, ...computerStuffData];
 }
 
+function getSurvivorDifficultyTier(score) {
+  if (score < 8) return 'bronze';
+  if (score < 16) return 'prata';
+  return 'ouro';
+}
+
+function getQuestionsByTier(tier) {
+  return getAllQuestions().filter(q => q.difficulty === tier);
+}
+
 function getOptionClass(option, question) {
   if (!state.isAnswered) return '';
   if (option === question.answer) return 'correct';
@@ -389,13 +413,16 @@ window.startQuiz = (topicId, difficulty) => {
 
 window.startSurvivor = () => {
   state.isSurvivor = true;
-  state.currentDifficulty = 'sobrevivente';
+  state.survivorTier = 'bronze';
+  state.currentDifficulty = 'bronze';
   state.currentView = 'quiz';
   state.score = 0;
   state.streak = 0;
+  state.shields = 0;
   state.timeLeft = 30;
   state.isAnswered = false;
-  state.currentSurvivorQuestion = getRandomQuestion();
+  state.currentSurvivorQuestion = getRandomQuestion('bronze');
+  state.lastQuestionStartTime = Date.now();
   
   startTimer();
   renderApp();
@@ -418,9 +445,9 @@ function startTimer() {
   }, 1000);
 }
 
-function getRandomQuestion() {
-  const all = getAllQuestions();
-  return all[Math.floor(Math.random() * all.length)];
+function getRandomQuestion(tier) {
+  const pool = tier ? getQuestionsByTier(tier) : getAllQuestions();
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 window.goHome = () => {
@@ -436,16 +463,34 @@ window.selectAnswer = (answer) => {
   
   state.isAnswered = true;
   state.selectedAnswer = answer;
+  
   if (answer === question.answer) {
     state.score++;
     state.streak++;
     
+    // Check for shield gain
+    if (state.streak > 0 && state.streak % 10 === 0) {
+      state.shields++;
+      // Visual notification could go here
+    }
+
     let xpGain = XP_CORRECT;
     if (state.currentDifficulty === 'prata') xpGain *= 1.5;
     if (state.currentDifficulty === 'ouro') xpGain *= 2;
+    
     if (state.isSurvivor) {
-      xpGain *= 0.5; // Survivor gives less XP per question but it's infinite
-      state.timeLeft += 5;
+      xpGain *= 0.5;
+      const responseTime = Date.now() - state.lastQuestionStartTime;
+      const speedBonus = responseTime < 3000 ? 7 : 5; // 3 seconds threshold
+      state.timeLeft += speedBonus;
+      
+      // Update tier based on score
+      const nextTier = getSurvivorDifficultyTier(state.score);
+      if (nextTier !== state.survivorTier) {
+        state.survivorTier = nextTier;
+        state.currentDifficulty = nextTier;
+        confetti({ particleCount: 50, spread: 60, origin: { y: 0.7 }, colors: ['#ffffff', '#6366f1'] });
+      }
     }
     
     addXP(Math.round(xpGain + (state.streak >= 3 ? XP_STREAK_BONUS : 0)));
@@ -453,7 +498,11 @@ window.selectAnswer = (answer) => {
   } else {
     state.streak = 0;
     if (state.isSurvivor) {
-      state.timeLeft = Math.max(0, state.timeLeft - 3); // Penalty for wrong answer in survivor
+      if (state.shields > 0) {
+        state.shields--;
+      } else {
+        state.timeLeft = Math.max(0, state.timeLeft - 3);
+      }
     }
   }
   renderQuiz();
@@ -461,9 +510,10 @@ window.selectAnswer = (answer) => {
 
 window.nextQuestion = () => {
   if (state.isSurvivor) {
-    state.currentSurvivorQuestion = getRandomQuestion();
+    state.currentSurvivorQuestion = getRandomQuestion(state.survivorTier);
     state.isAnswered = false;
     state.selectedAnswer = null;
+    state.lastQuestionStartTime = Date.now();
     renderQuiz();
     return;
   }

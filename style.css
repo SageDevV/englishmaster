@@ -599,11 +599,22 @@ header {
   box-shadow: 0 0 40px rgba(239, 68, 68, 0.2);
 }
 
-.timer-display {
+.difficulty-tag.sobrevivente { background: #ef4444; color: white; }
+
+/* Survivor Mode Gamification */
+.survivor-header-stats {
   position: absolute;
-  top: -20px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: -25px;
+  left: 0;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1.5rem;
+  z-index: 30;
+}
+
+.timer-display {
   background: #1e293b;
   border: 2px solid #ef4444;
   padding: 0.75rem 2rem;
@@ -613,20 +624,24 @@ header {
   display: flex;
   align-items: center;
   gap: 0.5rem;
-  z-index: 20;
-  box-shadow: 0 10px 20px rgba(0,0,0,0.3);
+  box-shadow: 0 10px 25px rgba(0,0,0,0.4);
+  transition: all 0.5s ease;
 }
 
 .timer-display.low-time {
-  animation: pulse-red 0.5s infinite alternate;
+  animation: pulse-red 0.5s infinite alternate !important;
   background: #7f1d1d;
   border-color: #f87171;
 }
 
 @keyframes pulse-red {
-  from { transform: translateX(-50%) scale(1); }
-  to { transform: translateX(-50%) scale(1.1); }
+  from { transform: scale(1); }
+  to { transform: scale(1.1); }
 }
+
+.timer-display.tier-bronze { border-color: #cd7f32; }
+.timer-display.tier-prata { border-color: #c0c0c0; box-shadow: 0 0 20px rgba(192, 192, 192, 0.3); }
+.timer-display.tier-ouro { border-color: #ffd700; box-shadow: 0 0 30px rgba(255, 215, 0, 0.4); }
 
 .difficulty-tag {
   display: inline-block;
@@ -641,7 +656,43 @@ header {
 .difficulty-tag.bronze { background: #cd7f32; color: white; }
 .difficulty-tag.prata { background: #c0c0c0; color: #1e293b; }
 .difficulty-tag.ouro { background: #ffd700; color: #1e293b; }
-.difficulty-tag.sobrevivente { background: #ef4444; color: white; }
+
+.shield-display {
+  background: rgba(30, 41, 59, 0.9);
+  border: 2px solid #3b82f6;
+  padding: 0.5rem 1.2rem;
+  border-radius: 2rem;
+  font-weight: 800;
+  color: #60a5fa;
+  box-shadow: 0 5px 15px rgba(59, 130, 246, 0.3);
+  transition: all 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  transform: scale(0.8);
+  opacity: 0.5;
+}
+
+.shield-display.has-shields {
+  transform: scale(1);
+  opacity: 1;
+  animation: float 3s ease-in-out infinite;
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-5px) scale(1.05); }
+}
+
+.survivor-score-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: 12rem;
+  font-weight: 900;
+  color: rgba(255, 255, 255, 0.03);
+  pointer-events: none;
+  z-index: 0;
+  line-height: 1;
+}
 
 .survivor-score-big {
   font-size: 5rem;
