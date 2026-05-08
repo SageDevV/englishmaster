@@ -4,16 +4,26 @@ on:
   push:
     branches:
       - main
+  pull_request:
 
 jobs:
   build_and_deploy:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
       - name: Install Dependencies
-        run: npm install
+        run: npm ci || npm install
+
       - name: Build
         run: npm run build
+
       - name: Deploy to Firebase
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
@@ -21,3 +31,4 @@ jobs:
           firebaseServiceAccount: '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}'
           channelId: live
           projectId: question-word-platform
+          buildCommand: "" # Skip build step as we do it manually above
