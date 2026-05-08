@@ -41,26 +41,39 @@ const state = {
 
 // --- Auth Observers ---
 auth.onAuthStateChanged(async (user) => {
-  if (user) {
-    state.user = user;
-    await loadProgressFromFirestore(user.uid);
-    state.currentView = 'home';
-    renderApp();
-  } else {
-    state.user = null;
-    state.currentView = 'login';
+  try {
+    if (user) {
+      state.user = user;
+      await loadProgressFromFirestore(user.uid);
+      state.currentView = 'home';
+    } else {
+      state.user = null;
+      state.currentView = 'login';
+    }
+  } catch (error) {
+    console.error("Erro ao processar login/progresso:", error);
+    // Even if firestore fails, we allow the user to see the home screen
+    if (user) {
+      state.currentView = 'home';
+    }
+  } finally {
     renderApp();
   }
 });
 
 // --- Data Sync ---
 async function loadProgressFromFirestore(uid) {
-  const doc = await db.collection('users').doc(uid).get();
-  if (doc.exists) {
-    state.userStats = doc.data();
-  } else {
-    // Initial data for new user
-    await db.collection('users').doc(uid).set(state.userStats);
+  try {
+    const doc = await db.collection('users').doc(uid).get();
+    if (doc.exists) {
+      state.userStats = doc.data();
+    } else {
+      // Initial data for new user
+      await db.collection('users').doc(uid).set(state.userStats);
+    }
+  } catch (error) {
+    console.warn("Firestore não disponível, usando estado local:", error);
+    // We don't throw here so the app can continue
   }
 }
 
