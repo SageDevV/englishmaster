@@ -1,16 +1,17 @@
 @import url('https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;600;700&display=swap');
 
 :root {
-  --primary: #6366f1;
-  --primary-hover: #4f46e5;
-  --bg-dark: #0f172a;
-  --glass: rgba(255, 255, 255, 0.05);
-  --glass-border: rgba(255, 255, 255, 0.1);
-  --text-main: #f8fafc;
-  --text-muted: #94a3b8;
+  --primary: #ff0000; /* Pure Red for high contrast */
+  --primary-hover: #cc0000;
+  --bg-dark: #000000; /* Pure Black background */
+  --glass: rgba(255, 255, 255, 0.02);
+  --glass-border: rgba(255, 255, 255, 0.2); /* White outlines */
+  --text-main: #ffffff; /* Pure White text */
+  --text-muted: #888888;
   --success: #10b981;
-  --error: #ef4444;
+  --error: #ff0000;
   --warning: #f59e0b;
+  --accent-red: #ff0000;
 }
 
 * {
@@ -23,8 +24,8 @@ body {
   font-family: 'Outfit', sans-serif;
   background-color: var(--bg-dark);
   background-image: 
-    radial-gradient(at 0% 0%, rgba(99, 102, 241, 0.15) 0px, transparent 50%),
-    radial-gradient(at 100% 100%, rgba(168, 85, 247, 0.15) 0px, transparent 50%);
+    radial-gradient(at 0% 0%, rgba(255, 0, 0, 0.1) 0px, transparent 50%),
+    radial-gradient(at 100% 100%, rgba(255, 255, 255, 0.05) 0px, transparent 50%);
   color: var(--text-main);
   min-height: 100vh;
   display: flex;
@@ -93,9 +94,9 @@ header {
   display: flex;
   align-items: center;
   gap: 1rem;
-  background: var(--glass);
+  background: #0a0a0a;
   padding: 0.5rem 1rem 0.5rem 0.5rem;
-  border-radius: 3rem;
+  border-radius: 0.5rem;
   border: 1px solid var(--glass-border);
 }
 
@@ -132,12 +133,13 @@ header {
 }
 
 .level-badge {
-  background: linear-gradient(135deg, #f59e0b, #d97706);
+  background: linear-gradient(135deg, #ff0000, #990000);
   padding: 0.4rem 0.8rem;
   border-radius: 0.5rem;
   font-weight: 700;
   font-size: 0.9rem;
-  box-shadow: 0 4px 12px rgba(217, 119, 6, 0.3);
+  box-shadow: 0 4px 12px rgba(255, 0, 0, 0.3);
+  border: 1px solid rgba(255, 255, 255, 0.2);
 }
 
 .xp-container {
@@ -177,10 +179,9 @@ header {
 }
 
 .topic-card {
-  background: var(--glass);
-  backdrop-filter: blur(12px);
+  background: #0a0a0a;
   border: 1px solid var(--glass-border);
-  border-radius: 1.5rem;
+  border-radius: 1rem;
   padding: 2rem;
   cursor: pointer;
   transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
@@ -199,14 +200,13 @@ header {
   width: 100%;
   height: 4px;
   background: var(--card-color, var(--primary));
-  opacity: 0.7;
+  opacity: 1;
 }
 
 .topic-card:hover:not(.locked) {
   transform: translateY(-8px);
-  background: rgba(255, 255, 255, 0.08);
-  border-color: rgba(255, 255, 255, 0.2);
-  box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+  border-color: var(--primary);
+  box-shadow: 0 0 30px rgba(255, 0, 0, 0.2);
 }
 
 .topic-card.locked {
@@ -243,16 +243,15 @@ header {
 }
 
 .quiz-container {
-  background: var(--glass);
-  backdrop-filter: blur(16px);
-  border: 1px solid var(--glass-border);
-  border-radius: 2rem;
+  background: #000000;
+  border: 2px solid var(--glass-border);
+  border-radius: 1.5rem;
   padding: 3rem;
   max-width: 700px;
   margin: 0 auto;
   width: 100%;
   animation: scaleIn 0.5s ease-out;
-  box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+  box-shadow: 0 0 50px rgba(0, 0, 0, 1);
   position: relative;
 }
 
@@ -289,7 +288,7 @@ header {
 
 .progress-bar-fill {
   height: 100%;
-  background: linear-gradient(to right, #6366f1, #a855f7);
+  background: linear-gradient(to right, #ff0000, #ffffff);
   width: 0%;
   transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -308,13 +307,14 @@ header {
   position: absolute;
   top: -15px;
   right: 20px;
-  background: linear-gradient(135deg, #ef4444, #f97316);
-  color: white;
-  padding: 0.4rem 0.8rem;
-  border-radius: 2rem;
-  font-weight: 800;
-  font-size: 0.9rem;
-  box-shadow: 0 10px 15px -3px rgba(239, 68, 68, 0.4);
+  background: linear-gradient(135deg, #ff0000, #ffffff);
+  color: black;
+  padding: 0.4rem 1rem;
+  border-radius: 0.5rem;
+  font-weight: 900;
+  font-size: 1rem;
+  box-shadow: 0 0 20px rgba(255, 0, 0, 0.5);
+  border: 2px solid white;
   animation: bounce 0.5s infinite alternate;
   display: none;
   z-index: 10;
@@ -343,9 +343,9 @@ header {
 }
 
 .option-btn {
-  background: rgba(255, 255, 255, 0.03);
+  background: #0a0a0a;
   border: 1px solid var(--glass-border);
-  border-radius: 1rem;
+  border-radius: 0.5rem;
   padding: 1.2rem;
   color: var(--text-main);
   font-size: 1.1rem;
@@ -356,9 +356,9 @@ header {
 }
 
 .option-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
-  border-color: var(--primary);
-  transform: scale(1.02);
+  background: #1a1a1a;
+  border-color: #ffffff;
+  transform: translateX(5px);
 }
 
 .option-btn.correct {
@@ -399,20 +399,23 @@ header {
 .next-btn {
   margin-top: 2rem;
   width: 100%;
-  background: var(--primary);
+  background: #ff0000;
   color: white;
-  border: none;
+  border: 2px solid white;
   padding: 1.2rem;
-  border-radius: 1rem;
+  border-radius: 0.5rem;
   font-size: 1.1rem;
-  font-weight: 600;
+  font-weight: 900;
   cursor: pointer;
   transition: all 0.2s;
+  text-transform: uppercase;
+  letter-spacing: 1px;
 }
 
 .next-btn:hover {
-  background: var(--primary-hover);
-  box-shadow: 0 10px 20px -5px rgba(99, 102, 241, 0.4);
+  background: #cc0000;
+  box-shadow: 0 0 30px rgba(255, 0, 0, 0.5);
+  transform: translateY(-2px);
 }
 
 .result-screen {
@@ -463,15 +466,15 @@ header {
 }
 
 .survivor-banner {
-  background: linear-gradient(135deg, #1e1b4b 0%, #312e81 100%);
-  border: 2px solid #6366f1;
-  border-radius: 1.5rem;
+  background: #000000;
+  border: 2px solid var(--primary);
+  border-radius: 1rem;
   padding: 2.5rem;
   cursor: pointer;
   position: relative;
   overflow: hidden;
   transition: all 0.3s;
-  box-shadow: 0 0 30px rgba(99, 102, 241, 0.2);
+  box-shadow: 0 0 20px rgba(255, 0, 0, 0.1);
 }
 
 .survivor-banner::after {
