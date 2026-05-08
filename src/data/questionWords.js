@@ -56,6 +56,13 @@ export const questionWordsData = [
     difficulty: "bronze",
     explanation: "Datas pedem 'When' (Quando)."
   },
+  {
+    question: "____ is that tall man? He's my uncle.",
+    options: ["Who", "What", "Where", "Why"],
+    answer: "Who",
+    difficulty: "bronze",
+    explanation: "'Who' é usado para perguntar sobre pessoas (Quem)."
+  },
 
   // --- PRATA (Médio) ---
   {
@@ -114,6 +121,13 @@ export const questionWordsData = [
     difficulty: "prata",
     explanation: "'How long' pergunta a duração."
   },
+  {
+    question: "____ way should we go? Left or right?",
+    options: ["What", "Which", "Who", "Where"],
+    answer: "Which",
+    difficulty: "prata",
+    explanation: "'Which' é usado quando há escolha limitada entre opções claras."
+  },
 
   // --- OURO (Difícil) ---
   {
@@ -171,5 +185,12 @@ export const questionWordsData = [
     answer: "What",
     difficulty: "ouro",
     explanation: "'What' é usado para perguntar sobre substantivos abstratos."
+  },
+  {
+    question: "____ for are you studying so hard? To pass the exam.",
+    options: ["Why", "What", "How", "Where"],
+    answer: "What",
+    difficulty: "ouro",
+    explanation: "'What... for' é uma construção idiomática equivalente a 'Why' (Para quê / Por que)."
   }
 ];

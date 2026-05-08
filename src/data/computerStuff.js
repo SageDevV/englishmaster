@@ -56,6 +56,13 @@ export const computerStuffData = [
     difficulty: "bronze",
     explanation: "O botão 'Power' liga e desliga o aparelho."
   },
+  {
+    question: "Which device is used to scan physical documents?",
+    options: ["Printer", "Scanner", "Monitor", "Mouse"],
+    answer: "Scanner",
+    difficulty: "bronze",
+    explanation: "'Scanner' é o aparelho que digitaliza documentos físicos."
+  },
 
   // --- PRATA (Médio) ---
   {
@@ -114,6 +121,13 @@ export const computerStuffData = [
     difficulty: "prata",
     explanation: "Browsers (Chrome, Firefox) servem para navegar na internet."
   },
+  {
+    question: "What is the main function of an 'Antivirus'?",
+    options: ["To speed up internet", "To detect and remove malware", "To edit videos", "To print files"],
+    answer: "To detect and remove malware",
+    difficulty: "prata",
+    explanation: "Antivírus protegem o sistema contra softwares maliciosos (malware)."
+  },
 
   // --- OURO (Difícil) ---
   {
@@ -171,5 +185,12 @@ export const computerStuffData = [
     answer: "A unique identifier for a device on a network",
     difficulty: "ouro",
     explanation: "Endereço IP identifica cada dispositivo em uma rede."
+  },
+  {
+    question: "What does 'HTTP' stand for?",
+    options: ["Hypertext Transfer Protocol", "High Tech Text Process", "Hyper Text Terminal Point", "Home Tool Transfer Path"],
+    answer: "Hypertext Transfer Protocol",
+    difficulty: "ouro",
+    explanation: "HTTP é o protocolo base para a transferência de dados na web."
   }
 ];

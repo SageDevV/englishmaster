@@ -56,6 +56,13 @@ export const verbToBeData = [
     difficulty: "bronze",
     explanation: "'You' pede o verbo 'are'."
   },
+  {
+    question: "My brother and I ____ twins.",
+    options: ["am", "is", "are", "be"],
+    answer: "are",
+    difficulty: "bronze",
+    explanation: "'My brother and I' equivale a 'We', logo usamos 'are'."
+  },
 
   // --- PRATA (Médio) ---
   {
@@ -114,6 +121,13 @@ export const verbToBeData = [
     difficulty: "prata",
     explanation: "'Keys' está no plural, usamos 'are'."
   },
+  {
+    question: "Physics ____ my favorite subject in school.",
+    options: ["am", "is", "are", "be"],
+    answer: "is",
+    difficulty: "prata",
+    explanation: "Nomes de disciplinas acadêmicas (Physics, Economics) são singulares."
+  },
 
   // --- OURO (Difícil) ---
   {
@@ -171,5 +185,12 @@ export const verbToBeData = [
     answer: "are",
     difficulty: "ouro",
     explanation: "Quando os membros do comitê agem individualmente, usa-se o plural."
+  },
+  {
+    question: "Not only the students but also the teacher ____ excited.",
+    options: ["am", "is", "are", "be"],
+    answer: "is",
+    difficulty: "ouro",
+    explanation: "Com 'not only... but also', o verbo concorda com o sujeito mais próximo ('the teacher')."
   }
 ];
