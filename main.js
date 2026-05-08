@@ -6,12 +6,12 @@ import { computerStuffData } from './src/data/computerStuff.js';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
-  apiKey: "YOUR_API_KEY",
+  apiKey: "AIzaSyCuNKZ9tWW_vLZ4bS8hwrDNMnuHWRuNeSI",
   authDomain: "englishmaster-ea9b9.firebaseapp.com",
   projectId: "englishmaster-ea9b9",
-  storageBucket: "englishmaster-ea9b9.appspot.com",
-  messagingSenderId: "YOUR_SENDER_ID",
-  appId: "YOUR_APP_ID"
+  storageBucket: "englishmaster-ea9b9.firebasestorage.app",
+  messagingSenderId: "283770517765",
+  appId: "1:283770517765:web:1d54dfd085e5094c7c5f6c"
 };
 
 // Initialize Firebase
