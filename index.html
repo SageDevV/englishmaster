@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mestre do Inglês | Question Words e Mais</title>
+  <meta name="description" content="Aprenda inglês com quizzes interativos e explicações claras. Comece com Question Words hoje!" />
+  <link rel="stylesheet" href="./style.css" />
+  <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+  
+  <!-- Firebase SDKs -->
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-firestore-compat.js"></script>
+</head>
+<body>
+  <div id="app">
+    <header>
+      <div class="header-top">
+        <h1>Mestre do Inglês</h1>
+        <div class="user-stats">
+          <div class="level-badge">Nível <span id="user-level">1</span></div>
+          <div class="xp-container">
+            <div class="xp-bar-fill" id="user-xp-bar"></div>
+            <span class="xp-text"><span id="user-xp">0</span> XP</span>
+          </div>
+        </div>
+      </div>
+      <p>Sua plataforma interativa para dominar o inglês</p>
+    </header>
+
+    <main id="main-content">
+      <!-- Content will be injected by JavaScript -->
+    </main>
+  </div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
