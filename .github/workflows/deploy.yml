@@ -24,11 +24,14 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Verify Build Output
+        run: ls -R dist
+
       - name: Deploy to Firebase
         uses: FirebaseExtended/action-hosting-deploy@v0
         with:
           repoToken: '${{ secrets.GITHUB_TOKEN }}'
           firebaseServiceAccount: '${{ secrets.FIREBASE_SERVICE_ACCOUNT }}'
-          channelId: live
           projectId: question-word-platform
-          buildCommand: "" # Skip build step as we do it manually above
+          entryPoint: .
+          buildCommand: ""
