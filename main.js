@@ -22,29 +22,66 @@ if (typeof firebase !== 'undefined') {
 const auth = firebase.auth();
 const db = firebase.firestore();
 
+// --- Game Balance ---
+const XP_PER_LEVEL = 100;
+const XP_CORRECT = 20;
+const XP_STREAK_BONUS = 5;
+const SURVIVOR_START_TIME = 30;
+const MAX_SURVIVOR_TIME = 60;
+const MAX_SHIELDS = 3;
+const SHIELD_EVERY_STREAK = 10;
+
+const topicQuestionMap = {
+  'question-words': questionWordsData,
+  'verb-to-be': verbToBeData,
+  'computer-stuff': computerStuffData
+};
+
+const allQuestionData = Object.entries(topicQuestionMap).flatMap(([topicId, questions]) =>
+  questions.map((question, index) => ({
+    ...question,
+    id: `${topicId}-${index}`,
+    topicId
+  }))
+);
+
+function createDefaultStats() {
+  return {
+    xp: 0,
+    level: 1,
+    topicHistory: {},
+    survivorBest: 0,
+    totalCorrect: 0,
+    quizzesCompleted: 0,
+    rankingScore: 0
+  };
+}
+
 // --- Application State ---
 const state = {
   currentView: 'login',
   currentTopic: null,
-  currentDifficulty: 'bronze', // 'bronze', 'prata', 'ouro', 'sobrevivente'
+  currentDifficulty: 'bronze',
   currentQuestionIndex: 0,
+  questionQueue: [],
   score: 0,
   isAnswered: false,
   selectedAnswer: null,
+  answerMode: 'multiple',
   streak: 0,
   user: null,
-  timeLeft: 30,
+  timeLeft: SURVIVOR_START_TIME,
   timerId: null,
   isSurvivor: false,
   survivorTier: 'bronze',
   shields: 0,
   lastQuestionStartTime: 0,
-  userStats: {
-    xp: 0,
-    level: 1,
-    topicHistory: {},
-    survivorBest: 0
-  }
+  lastQuestionId: null,
+  survivorAskedIds: [],
+  currentSurvivorQuestion: null,
+  resultReason: 'completed',
+  leaderboard: [],
+  userStats: createDefaultStats()
 };
 
 // --- Auth Observers ---
@@ -53,6 +90,8 @@ auth.onAuthStateChanged(async (user) => {
     if (user) {
       state.user = user;
       await loadProgressFromFirestore(user.uid);
+      await saveProgressToFirestore();
+      await loadLeaderboardFromFirestore();
       state.currentView = 'home';
     } else {
       state.user = null;
@@ -60,7 +99,6 @@ auth.onAuthStateChanged(async (user) => {
     }
   } catch (error) {
     console.error("Erro ao processar login/progresso:", error);
-    // Even if firestore fails, we allow the user to see the home screen
     if (user) {
       state.currentView = 'home';
     }
@@ -70,24 +108,82 @@ auth.onAuthStateChanged(async (user) => {
 });
 
 // --- Data Sync ---
+function normalizeStats(data = {}) {
+  const defaults = createDefaultStats();
+  const normalized = {
+    ...defaults,
+    ...data,
+    level: Number(data.level || defaults.level),
+    xp: Number(data.xp || defaults.xp),
+    survivorBest: Number(data.survivorBest || defaults.survivorBest),
+    totalCorrect: Number(data.totalCorrect || defaults.totalCorrect),
+    quizzesCompleted: Number(data.quizzesCompleted || defaults.quizzesCompleted),
+    topicHistory: data.topicHistory || defaults.topicHistory
+  };
+
+  normalized.rankingScore = calculateRankingScore(normalized);
+  return normalized;
+}
+
+function calculateRankingScore(stats) {
+  const totalXp = ((stats.level || 1) - 1) * XP_PER_LEVEL + (stats.xp || 0);
+  return totalXp + (stats.totalCorrect || 0) * 2 + (stats.survivorBest || 0) * 10;
+}
+
+function getUserProfilePayload() {
+  const rankingScore = calculateRankingScore(state.userStats);
+  state.userStats.rankingScore = rankingScore;
+
+  return {
+    ...state.userStats,
+    displayName: state.user?.displayName || 'Aluno',
+    photoURL: state.user?.photoURL || '',
+    email: state.user?.email || '',
+    rankingScore,
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  };
+}
+
 async function loadProgressFromFirestore(uid) {
   try {
     const doc = await db.collection('users').doc(uid).get();
-    if (doc.exists) {
-      state.userStats = doc.data();
-    } else {
-      // Initial data for new user
-      await db.collection('users').doc(uid).set(state.userStats);
-    }
+    state.userStats = doc.exists ? normalizeStats(doc.data()) : createDefaultStats();
   } catch (error) {
-    console.warn("Firestore não disponível, usando estado local:", error);
-    // We don't throw here so the app can continue
+    console.warn("Firestore nao disponivel, usando estado local:", error);
+    state.userStats = normalizeStats(state.userStats);
   }
 }
 
 async function saveProgressToFirestore() {
-  if (state.user) {
-    await db.collection('users').doc(state.user.uid).set(state.userStats);
+  if (!state.user) return;
+
+  try {
+    await db.collection('users').doc(state.user.uid).set(getUserProfilePayload(), { merge: true });
+  } catch (error) {
+    console.warn("Nao foi possivel salvar no Firestore:", error);
+  }
+}
+
+async function loadLeaderboardFromFirestore() {
+  if (!state.user) return;
+
+  try {
+    const snapshot = await db
+      .collection('users')
+      .orderBy('rankingScore', 'desc')
+      .limit(10)
+      .get();
+
+    state.leaderboard = snapshot.docs.map((doc, index) => ({
+      id: doc.id,
+      rank: index + 1,
+      ...normalizeStats(doc.data()),
+      displayName: doc.data().displayName || 'Aluno',
+      photoURL: doc.data().photoURL || ''
+    }));
+  } catch (error) {
+    console.warn("Nao foi possivel carregar o ranking:", error);
+    state.leaderboard = [];
   }
 }
 
@@ -101,27 +197,83 @@ window.loginWithGoogle = () => {
 };
 
 window.logout = () => {
+  stopTimer();
   auth.signOut();
 };
 
-// --- XP Logic ---
-const XP_PER_LEVEL = 100;
-const XP_CORRECT = 20;
-const XP_STREAK_BONUS = 5;
+// --- Utility ---
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
+}
 
+function shuffleArray(items) {
+  const shuffled = [...items];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
+function withShuffledOptions(question) {
+  return {
+    ...question,
+    optionOrder: shuffleArray(question.options || [])
+  };
+}
+
+function normalizeAnswer(value) {
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ');
+}
+
+function isCorrectAnswer(answer, question) {
+  const acceptedAnswers = [question.answer, ...(question.acceptedAnswers || [])];
+  return acceptedAnswers.some(correctAnswer => normalizeAnswer(correctAnswer) === normalizeAnswer(answer));
+}
+
+function launchConfetti(options) {
+  if (typeof confetti === 'function') {
+    confetti(options);
+  }
+}
+
+function stopTimer() {
+  if (state.timerId) {
+    clearInterval(state.timerId);
+    state.timerId = null;
+  }
+}
+
+// --- XP Logic ---
 function addXP(amount) {
   state.userStats.xp += amount;
-  if (state.userStats.xp >= XP_PER_LEVEL) {
+
+  while (state.userStats.xp >= XP_PER_LEVEL) {
     state.userStats.level++;
     state.userStats.xp -= XP_PER_LEVEL;
-    confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 }, colors: ['#f59e0b', '#fbbf24', '#ffffff'] });
+    launchConfetti({
+      particleCount: 150,
+      spread: 70,
+      origin: { y: 0.6 },
+      colors: ['#f59e0b', '#fbbf24', '#ffffff']
+    });
   }
+
   saveProgressToFirestore();
   updateHeader();
 }
 
 // --- UI Rendering ---
-
 function renderApp() {
   if (!state.user) {
     renderLogin();
@@ -158,23 +310,27 @@ function renderLogin() {
 function updateHeader() {
   const headerTop = document.querySelector('.header-top');
   if (!headerTop) return;
-  
+
   headerTop.style.display = 'flex';
   document.querySelector('header p').style.display = 'block';
 
+  const photoURL = state.user.photoURL || '';
+  const displayName = escapeHtml(state.user.displayName || 'Aluno');
+  const xpPercent = Math.min(100, (state.userStats.xp / XP_PER_LEVEL) * 100);
+
   headerTop.innerHTML = `
     <div class="user-profile">
-      <img src="${state.user.photoURL}" class="user-avatar" alt="Profile">
+      ${photoURL ? `<img src="${escapeHtml(photoURL)}" class="user-avatar" alt="Profile">` : '<div class="user-avatar avatar-fallback">A</div>'}
       <div style="text-align: left">
-        <div style="font-weight: 700; font-size: 0.9rem">${state.user.displayName}</div>
+        <div style="font-weight: 700; font-size: 0.9rem">${displayName}</div>
         <button class="logout-btn" onclick="window.logout()">Sair</button>
       </div>
     </div>
-    
+
     <div class="user-stats">
       <div class="level-badge">Nível <span id="user-level">${state.userStats.level}</span></div>
       <div class="xp-container">
-        <div class="xp-bar-fill" id="user-xp-bar" style="width: ${(state.userStats.xp/XP_PER_LEVEL)*100}%"></div>
+        <div class="xp-bar-fill" id="user-xp-bar" style="width: ${xpPercent}%"></div>
         <span class="xp-text"><span>${state.userStats.xp}</span> XP</span>
       </div>
     </div>
@@ -184,12 +340,18 @@ function updateHeader() {
 function renderHome() {
   state.currentView = 'home';
   const mainContent = document.getElementById('main-content');
+
   mainContent.innerHTML = `
     <div class="home-container">
+      <div class="home-dashboard">
+        ${renderAnswerModePanel()}
+        ${renderLeaderboard()}
+      </div>
+
       <div class="survivor-banner" onclick="window.startSurvivor()">
         <div class="survivor-content">
           <h2>MODO SOBREVIVENTE ⏳</h2>
-          <p>O tempo não para! Acerte para ganhar segundos. Qual o seu recorde?</p>
+          <p>O tempo não para! Acerte para ganhar segundos, até o teto de ${MAX_SURVIVOR_TIME}s.</p>
           <div class="best-score">MELHOR PONTUAÇÃO: ${state.userStats.survivorBest || 0}</div>
         </div>
       </div>
@@ -198,7 +360,7 @@ function renderHome() {
         ${topics.map(topic => {
           const history = state.userStats.topicHistory[topic.id] || { stars: 0 };
           return `
-          <div class="topic-card ${topic.locked ? 'locked' : ''}" 
+          <div class="topic-card ${topic.locked ? 'locked' : ''}"
                style="--card-color: ${topic.color}"
                onclick="${topic.locked ? '' : `window.openDifficultyModal('${topic.id}')`}">
             <div class="topic-icon">${topic.icon}</div>
@@ -207,14 +369,13 @@ function renderHome() {
                 <span class="${i < history.stars ? 'star-filled' : 'star-empty'}">★</span>
               `).join('')}
             </div>
-            <h3>${topic.title}</h3>
-            <p>${topic.description}</p>
+            <h3>${escapeHtml(topic.title)}</h3>
+            <p>${escapeHtml(topic.description)}</p>
           </div>
         `}).join('')}
       </div>
     </div>
 
-    <!-- Difficulty Modal -->
     <div id="difficulty-modal" class="modal">
       <div class="modal-content">
         <h2>Escolha a Dificuldade</h2>
@@ -235,25 +396,72 @@ function renderHome() {
   `;
 }
 
-function renderQuiz() {
-  const data = state.isSurvivor ? getAllQuestions() : getTopicData(state.currentTopic, state.currentDifficulty);
-  const question = state.isSurvivor ? state.currentSurvivorQuestion : data[state.currentQuestionIndex];
-  const progress = state.isSurvivor ? 100 : ((state.currentQuestionIndex) / data.length) * 100;
+function renderAnswerModePanel() {
+  return `
+    <section class="answer-mode-panel" aria-label="Modo de resposta">
+      <div>
+        <h2>Modo de resposta</h2>
+        <p>${state.answerMode === 'multiple' ? 'Toque na alternativa correta.' : 'Digite a resposta correta.'}</p>
+      </div>
+      <div class="mode-toggle">
+        <button class="mode-btn ${state.answerMode === 'multiple' ? 'active' : ''}" onclick="window.setAnswerMode('multiple')">
+          Alternativas
+        </button>
+        <button class="mode-btn ${state.answerMode === 'written' ? 'active' : ''}" onclick="window.setAnswerMode('written')">
+          Escrita
+        </button>
+      </div>
+    </section>
+  `;
+}
 
+function renderLeaderboard() {
+  const rows = state.leaderboard.length
+    ? state.leaderboard.map(student => `
+        <div class="leaderboard-row ${student.id === state.user.uid ? 'current-student' : ''}">
+          <span class="rank-position">#${student.rank}</span>
+          <span class="rank-name">${escapeHtml(student.displayName)}</span>
+          <span class="rank-score">${student.rankingScore || 0} pts</span>
+        </div>
+      `).join('')
+    : '<div class="leaderboard-empty">Ranking indisponível no momento.</div>';
+
+  return `
+    <section class="leaderboard-panel" aria-label="Ranking dos alunos">
+      <div class="leaderboard-header">
+        <h2>Ranking dos alunos</h2>
+        <button class="refresh-rank-btn" onclick="window.refreshLeaderboard()" aria-label="Atualizar ranking">↻</button>
+      </div>
+      <div class="leaderboard-list">${rows}</div>
+    </section>
+  `;
+}
+
+function renderQuiz() {
+  const question = getCurrentQuestion();
+
+  if (!question) {
+    renderEmptyQuiz();
+    return;
+  }
+
+  const totalQuestions = state.isSurvivor ? 1 : state.questionQueue.length;
+  const progress = state.isSurvivor ? 100 : (state.currentQuestionIndex / totalQuestions) * 100;
   const mainContent = document.getElementById('main-content');
+
   mainContent.innerHTML = `
     <div class="quiz-container ${state.isSurvivor ? 'survivor-mode' : ''}">
       <div id="streak-badge" class="streak-badge" style="display: ${state.streak >= 2 ? 'block' : 'none'}">
         🔥 COMBO X${state.streak}
       </div>
-      
+
       ${state.isSurvivor ? `
         <div class="survivor-header-stats">
           <div class="timer-display ${state.timeLeft < 10 ? 'low-time' : ''} tier-${state.survivorTier}">
             <span class="timer-icon">⏳</span> <span id="timer-seconds">${state.timeLeft}s</span>
           </div>
           <div class="shield-display ${state.shields > 0 ? 'has-shields' : ''}">
-            🛡️ x${state.shields}
+            🛡️ ${state.shields}/${MAX_SHIELDS}
           </div>
         </div>
       ` : ''}
@@ -267,46 +475,70 @@ function renderQuiz() {
           ${state.isSurvivor ? `NÍVEL: ${state.survivorTier.toUpperCase()}` : `PONTOS: ${state.score}`}
         </div>
       </div>
-      
+
       ${state.isSurvivor ? `<div class="survivor-score-overlay">${state.score}</div>` : ''}
 
       <div class="question-box">
         <div class="difficulty-tag ${state.currentDifficulty}">${state.currentDifficulty.toUpperCase()}</div>
-        <p class="question-text">${question.question}</p>
-        <div class="options-grid">
-          ${question.options.map(option => `
-            <button class="option-btn ${getOptionClass(option, question)}" 
-                    onclick="window.selectAnswer('${option}')"
-                    ${state.isAnswered ? 'disabled' : ''}>
-              ${option}
-            </button>
-          `).join('')}
-        </div>
+        <p class="question-text">${escapeHtml(question.question)}</p>
+        ${state.answerMode === 'written' ? renderWrittenAnswerForm() : renderMultipleChoiceOptions(question)}
       </div>
+    </div>
+  `;
 
-      ${state.isAnswered ? `
-        <div class="feedback-area">
-          <span class="feedback-title ${state.selectedAnswer === question.answer ? 'text-success' : 'text-error'}">
-            ${state.selectedAnswer === question.answer 
-              ? (state.isSurvivor && (Date.now() - state.lastQuestionStartTime < 3000) ? '⚡ VELOZ! +7s' : '✨ Correto! ' + (state.isSurvivor ? '+5s' : ''))
-              : (state.isSurvivor && state.shields > 0 ? '🛡️ ESCUDO USADO!' : '❌ Incorreto')}
-          </span>
-          <p class="feedback-text">${question.explanation}</p>
-          <button class="next-btn" onclick="window.nextQuestion()">
-            ${(!state.isSurvivor && state.currentQuestionIndex === data.length - 1) ? 'Finalizar Quiz' : 'Próxima Pergunta'}
-          </button>
-        </div>
-      ` : ''}
+  if (state.answerMode === 'written') {
+    requestAnimationFrame(() => document.getElementById('written-answer')?.focus());
+  }
+}
+
+function renderMultipleChoiceOptions(question) {
+  return `
+    <div class="options-grid">
+      ${question.optionOrder.map((option, index) => `
+        <button class="option-btn" onclick="window.selectAnswerByIndex(${index})" ${state.isAnswered ? 'disabled' : ''}>
+          ${escapeHtml(option)}
+        </button>
+      `).join('')}
+    </div>
+  `;
+}
+
+function renderWrittenAnswerForm() {
+  return `
+    <form class="written-answer-form" onsubmit="window.submitWrittenAnswer(event)">
+      <input
+        id="written-answer"
+        class="written-answer-input"
+        type="text"
+        autocomplete="off"
+        placeholder="Digite sua resposta"
+        aria-label="Digite sua resposta"
+        ${state.isAnswered ? 'disabled' : ''}
+      />
+      <button class="next-btn written-submit" type="submit" ${state.isAnswered ? 'disabled' : ''}>
+        Responder
+      </button>
+    </form>
+  `;
+}
+
+function renderEmptyQuiz() {
+  const mainContent = document.getElementById('main-content');
+  mainContent.innerHTML = `
+    <div class="quiz-container result-screen">
+      <h2>Nenhuma pergunta encontrada</h2>
+      <p style="font-size: 1.1rem; margin-bottom: 2rem">Escolha outro tópico ou dificuldade.</p>
+      <button class="next-btn" onclick="window.goHome()">Voltar ao Início</button>
     </div>
   `;
 }
 
 function renderResults() {
-  if (state.timerId) clearInterval(state.timerId);
-  
-  const data = state.isSurvivor ? getAllQuestions() : getTopicData(state.currentTopic, state.currentDifficulty);
-  const percentage = state.isSurvivor ? 0 : Math.round((state.score / data.length) * 100);
-  
+  stopTimer();
+
+  const totalQuestions = state.isSurvivor ? Math.max(1, state.score) : state.questionQueue.length;
+  const percentage = state.isSurvivor ? 0 : Math.round((state.score / totalQuestions) * 100);
+
   let stars = 0;
   if (!state.isSurvivor) {
     if (percentage >= 100) stars = 3;
@@ -316,20 +548,19 @@ function renderResults() {
     const history = state.userStats.topicHistory[state.currentTopic] || { stars: 0 };
     if (stars > history.stars) {
       state.userStats.topicHistory[state.currentTopic] = { stars };
-      saveProgressToFirestore();
     }
-  } else {
-    if (state.score > (state.userStats.survivorBest || 0)) {
-      state.userStats.survivorBest = state.score;
-      saveProgressToFirestore();
-    }
+    state.userStats.quizzesCompleted++;
+    saveProgressToFirestore();
+  } else if (state.score > (state.userStats.survivorBest || 0)) {
+    state.userStats.survivorBest = state.score;
+    saveProgressToFirestore();
   }
 
   const mainContent = document.getElementById('main-content');
   mainContent.innerHTML = `
     <div class="quiz-container result-screen ${state.isSurvivor ? 'survivor-results' : ''}">
-      <h2>${state.isSurvivor ? 'Tempo Esgotado!' : 'Quiz Finalizado!'}</h2>
-      
+      <h2>${getResultTitle()}</h2>
+
       ${!state.isSurvivor ? `
         <div class="topic-stars" style="justify-content: center; font-size: 3rem; margin: 1rem 0">
           ${Array.from({ length: 3 }).map((_, i) => `
@@ -341,33 +572,36 @@ function renderResults() {
         <div class="survivor-score-big">${state.score}</div>
         <p>Questões respondidas</p>
       `}
-      
+
       <p style="font-size: 1.2rem; margin-bottom: 2rem">
-        ${state.isSurvivor ? `Você sobreviveu por uma pontuação de <strong>${state.score}</strong>!` : `Você acertou <strong>${state.score}</strong> de <strong>${data.length}</strong> perguntas.`}
+        ${state.isSurvivor
+          ? `Você terminou com <strong>${state.score}</strong> ponto(s).`
+          : `Você acertou <strong>${state.score}</strong> de <strong>${totalQuestions}</strong> perguntas.`}
       </p>
-      
+
       <button class="next-btn" onclick="window.goHome()">Voltar ao Início</button>
     </div>
   `;
 
   if (stars === 3 || (state.isSurvivor && state.score > 20)) {
-    confetti({ particleCount: 200, spread: 100, origin: { y: 0.6 } });
+    launchConfetti({ particleCount: 200, spread: 100, origin: { y: 0.6 } });
   }
 }
 
+function getResultTitle() {
+  if (!state.isSurvivor) return 'Quiz Finalizado!';
+  if (state.resultReason === 'wrong') return 'Você errou!';
+  if (state.resultReason === 'time') return 'Tempo Esgotado!';
+  return 'Modo Sobrevivente Finalizado!';
+}
+
+// --- Question Selection ---
 function getTopicData(topicId, difficulty) {
-  let fullData = [];
-  switch(topicId) {
-    case 'question-words': fullData = questionWordsData; break;
-    case 'verb-to-be': fullData = verbToBeData; break;
-    case 'computer-stuff': fullData = computerStuffData; break;
-    default: fullData = [];
-  }
-  return fullData.filter(q => q.difficulty === difficulty);
+  return allQuestionData.filter(q => q.topicId === topicId && q.difficulty === difficulty);
 }
 
 function getAllQuestions() {
-  return [...questionWordsData, ...verbToBeData, ...computerStuffData];
+  return allQuestionData;
 }
 
 function getSurvivorDifficultyTier(score) {
@@ -380,13 +614,35 @@ function getQuestionsByTier(tier) {
   return getAllQuestions().filter(q => q.difficulty === tier);
 }
 
-function getOptionClass(option, question) {
-  if (!state.isAnswered) return '';
-  if (option === question.answer) return 'correct';
-  if (option === state.selectedAnswer) return 'wrong';
-  return '';
+function getCurrentQuestion() {
+  return state.isSurvivor ? state.currentSurvivorQuestion : state.questionQueue[state.currentQuestionIndex];
 }
 
+function buildQuestionQueue(topicId, difficulty) {
+  return shuffleArray(getTopicData(topicId, difficulty)).map(withShuffledOptions);
+}
+
+function getRandomQuestion(tier) {
+  const pool = getQuestionsByTier(tier);
+  if (!pool.length) return null;
+
+  const askedIds = new Set(state.survivorAskedIds);
+  let available = pool.filter(question => !askedIds.has(question.id) && question.id !== state.lastQuestionId);
+
+  if (!available.length) {
+    state.survivorAskedIds = [];
+    available = pool.filter(question => question.id !== state.lastQuestionId);
+  }
+
+  const fallbackPool = available.length ? available : pool;
+  const question = fallbackPool[Math.floor(Math.random() * fallbackPool.length)];
+  state.survivorAskedIds.push(question.id);
+  state.lastQuestionId = question.id;
+
+  return withShuffledOptions(question);
+}
+
+// --- Actions ---
 window.openDifficultyModal = (topicId) => {
   window.pendingTopic = topicId;
   const modal = document.getElementById('difficulty-modal');
@@ -398,15 +654,34 @@ window.closeDifficultyModal = () => {
   if (modal) modal.style.display = 'none';
 };
 
+window.setAnswerMode = (mode) => {
+  state.answerMode = mode === 'written' ? 'written' : 'multiple';
+  renderHome();
+};
+
+window.refreshLeaderboard = async () => {
+  await loadLeaderboardFromFirestore();
+  renderHome();
+};
+
 window.startQuiz = (topicId, difficulty) => {
+  const queue = buildQuestionQueue(topicId, difficulty);
+  if (!queue.length) {
+    alert("Nenhuma pergunta encontrada para esta dificuldade.");
+    return;
+  }
+
   state.currentTopic = topicId;
   state.currentDifficulty = difficulty;
   state.currentView = 'quiz';
   state.currentQuestionIndex = 0;
+  state.questionQueue = queue;
   state.score = 0;
   state.streak = 0;
   state.isAnswered = false;
+  state.selectedAnswer = null;
   state.isSurvivor = false;
+  state.resultReason = 'completed';
   window.closeDifficultyModal();
   renderApp();
 };
@@ -419,115 +694,153 @@ window.startSurvivor = () => {
   state.score = 0;
   state.streak = 0;
   state.shields = 0;
-  state.timeLeft = 30;
+  state.timeLeft = SURVIVOR_START_TIME;
   state.isAnswered = false;
+  state.selectedAnswer = null;
+  state.survivorAskedIds = [];
+  state.lastQuestionId = null;
+  state.resultReason = 'time';
   state.currentSurvivorQuestion = getRandomQuestion('bronze');
   state.lastQuestionStartTime = Date.now();
-  
+
   startTimer();
   renderApp();
 };
 
 function startTimer() {
-  if (state.timerId) clearInterval(state.timerId);
+  stopTimer();
   state.timerId = setInterval(() => {
     state.timeLeft--;
-    const timerEl = document.getElementById('timer-seconds');
-    if (timerEl) {
-      timerEl.innerText = state.timeLeft + 's';
-      if (state.timeLeft < 10) timerEl.parentElement.classList.add('low-time');
-    }
-    
+    updateTimerDisplay();
+
     if (state.timeLeft <= 0) {
-      clearInterval(state.timerId);
+      state.resultReason = 'time';
       renderResults();
     }
   }, 1000);
 }
 
-function getRandomQuestion(tier) {
-  const pool = tier ? getQuestionsByTier(tier) : getAllQuestions();
-  return pool[Math.floor(Math.random() * pool.length)];
+function updateTimerDisplay() {
+  const timerEl = document.getElementById('timer-seconds');
+  if (!timerEl) return;
+
+  timerEl.innerText = state.timeLeft + 's';
+  if (state.timeLeft < 10) timerEl.parentElement.classList.add('low-time');
 }
 
-window.goHome = () => {
-  if (state.timerId) clearInterval(state.timerId);
+window.goHome = async () => {
+  stopTimer();
   state.currentView = 'home';
+  await loadLeaderboardFromFirestore();
   renderApp();
 };
 
-window.selectAnswer = (answer) => {
-  if (state.isAnswered) return;
-  const data = state.isSurvivor ? getAllQuestions() : getTopicData(state.currentTopic, state.currentDifficulty);
-  const question = state.isSurvivor ? state.currentSurvivorQuestion : data[state.currentQuestionIndex];
-  
-  state.isAnswered = true;
-  state.selectedAnswer = answer;
-  
-  if (answer === question.answer) {
-    state.score++;
-    state.streak++;
-    
-    // Check for shield gain
-    if (state.streak > 0 && state.streak % 10 === 0) {
-      state.shields++;
-      // Visual notification could go here
-    }
-
-    let xpGain = XP_CORRECT;
-    if (state.currentDifficulty === 'prata') xpGain *= 1.5;
-    if (state.currentDifficulty === 'ouro') xpGain *= 2;
-    
-    if (state.isSurvivor) {
-      xpGain *= 0.5;
-      const responseTime = Date.now() - state.lastQuestionStartTime;
-      const speedBonus = responseTime < 3000 ? 7 : 5; // 3 seconds threshold
-      state.timeLeft += speedBonus;
-      
-      // Update tier based on score
-      const nextTier = getSurvivorDifficultyTier(state.score);
-      if (nextTier !== state.survivorTier) {
-        state.survivorTier = nextTier;
-        state.currentDifficulty = nextTier;
-        confetti({ particleCount: 50, spread: 60, origin: { y: 0.7 }, colors: ['#ffffff', '#6366f1'] });
-      }
-    }
-    
-    addXP(Math.round(xpGain + (state.streak >= 3 ? XP_STREAK_BONUS : 0)));
-    confetti({ particleCount: 30, spread: 50, origin: { y: 0.8 }, colors: ['#10b981', '#ffffff'] });
-  } else {
-    state.streak = 0;
-    if (state.isSurvivor) {
-      if (state.shields > 0) {
-        state.shields--;
-      } else {
-        state.timeLeft = Math.max(0, state.timeLeft - 3);
-      }
-    }
-  }
-  renderQuiz();
+window.selectAnswerByIndex = (index) => {
+  const question = getCurrentQuestion();
+  if (!question || state.isAnswered) return;
+  handleAnswer(question.optionOrder[index]);
 };
 
-window.nextQuestion = () => {
+window.submitWrittenAnswer = (event) => {
+  event.preventDefault();
+  const question = getCurrentQuestion();
+  const input = document.getElementById('written-answer');
+  if (!question || !input || state.isAnswered) return;
+
+  const answer = input.value.trim();
+  if (!answer) {
+    input.focus();
+    return;
+  }
+
+  handleAnswer(answer);
+};
+
+function handleAnswer(answer) {
+  const question = getCurrentQuestion();
+  if (!question) return;
+
+  state.isAnswered = true;
+  state.selectedAnswer = answer;
+
+  if (isCorrectAnswer(answer, question)) {
+    handleCorrectAnswer();
+    goToNextQuestion();
+    return;
+  }
+
+  handleWrongAnswer();
+}
+
+function handleCorrectAnswer() {
+  state.score++;
+  state.streak++;
+  state.userStats.totalCorrect++;
+
+  if (state.streak > 0 && state.streak % SHIELD_EVERY_STREAK === 0) {
+    state.shields = Math.min(MAX_SHIELDS, state.shields + 1);
+  }
+
+  let xpGain = XP_CORRECT;
+  if (state.currentDifficulty === 'prata') xpGain *= 1.5;
+  if (state.currentDifficulty === 'ouro') xpGain *= 2;
+
+  if (state.isSurvivor) {
+    xpGain *= 0.5;
+    const responseTime = Date.now() - state.lastQuestionStartTime;
+    const speedBonus = responseTime < 3000 ? 7 : 5;
+    state.timeLeft = Math.min(MAX_SURVIVOR_TIME, state.timeLeft + speedBonus);
+
+    const nextTier = getSurvivorDifficultyTier(state.score);
+    if (nextTier !== state.survivorTier) {
+      state.survivorTier = nextTier;
+      state.currentDifficulty = nextTier;
+      launchConfetti({ particleCount: 50, spread: 60, origin: { y: 0.7 }, colors: ['#ffffff', '#6366f1'] });
+    }
+  }
+
+  addXP(Math.round(xpGain + (state.streak >= 3 ? XP_STREAK_BONUS : 0)));
+  launchConfetti({ particleCount: 30, spread: 50, origin: { y: 0.8 }, colors: ['#10b981', '#ffffff'] });
+}
+
+function handleWrongAnswer() {
+  state.streak = 0;
+
+  if (state.isSurvivor) {
+    if (state.shields > 0) {
+      state.shields--;
+      goToNextQuestion();
+      return;
+    }
+
+    state.resultReason = 'wrong';
+    state.timeLeft = 0;
+    renderResults();
+    return;
+  }
+
+  goToNextQuestion();
+}
+
+function goToNextQuestion() {
+  state.isAnswered = false;
+  state.selectedAnswer = null;
+
   if (state.isSurvivor) {
     state.currentSurvivorQuestion = getRandomQuestion(state.survivorTier);
-    state.isAnswered = false;
-    state.selectedAnswer = null;
     state.lastQuestionStartTime = Date.now();
     renderQuiz();
     return;
   }
 
-  const data = getTopicData(state.currentTopic, state.currentDifficulty);
-  if (state.currentQuestionIndex < data.length - 1) {
+  if (state.currentQuestionIndex < state.questionQueue.length - 1) {
     state.currentQuestionIndex++;
-    state.isAnswered = false;
-    state.selectedAnswer = null;
     renderQuiz();
   } else {
+    state.resultReason = 'completed';
     renderResults();
   }
-};
+}
 
 // Initialize
 renderApp();

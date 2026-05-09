@@ -107,6 +107,14 @@ header {
   border: 2px solid var(--primary);
 }
 
+.avatar-fallback {
+  display: grid;
+  place-items: center;
+  background: var(--primary);
+  color: #fff;
+  font-weight: 800;
+}
+
 .logout-btn {
   background: transparent;
   border: none;
@@ -396,6 +404,33 @@ header {
   font-size: 0.95rem;
 }
 
+.written-answer-form {
+  display: grid;
+  gap: 1rem;
+}
+
+.written-answer-input {
+  width: 100%;
+  min-height: 58px;
+  background: #0a0a0a;
+  border: 1px solid var(--glass-border);
+  border-radius: 0.5rem;
+  color: var(--text-main);
+  font-size: 1.2rem;
+  padding: 0 1rem;
+  outline: none;
+  transition: all 0.2s;
+}
+
+.written-answer-input:focus {
+  border-color: #fff;
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08);
+}
+
+.next-btn.written-submit {
+  margin-top: 0;
+}
+
 .next-btn {
   margin-top: 2rem;
   width: 100%;
@@ -463,6 +498,135 @@ header {
   flex-direction: column;
   gap: 2rem;
   width: 100%;
+}
+
+.home-dashboard {
+  display: grid;
+  grid-template-columns: minmax(0, 0.9fr) minmax(280px, 1.1fr);
+  gap: 1.5rem;
+  align-items: stretch;
+}
+
+.answer-mode-panel,
+.leaderboard-panel {
+  background: #0a0a0a;
+  border: 1px solid var(--glass-border);
+  border-radius: 1rem;
+  padding: 1.5rem;
+}
+
+.answer-mode-panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.answer-mode-panel h2,
+.leaderboard-panel h2 {
+  font-size: 1.2rem;
+  margin-bottom: 0.45rem;
+}
+
+.answer-mode-panel p {
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.mode-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.5rem;
+}
+
+.mode-btn,
+.refresh-rank-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--glass-border);
+  color: var(--text-main);
+  border-radius: 0.5rem;
+  cursor: pointer;
+  font-weight: 700;
+  transition: all 0.2s;
+}
+
+.mode-btn {
+  min-height: 44px;
+  padding: 0.75rem;
+}
+
+.mode-btn:hover,
+.refresh-rank-btn:hover {
+  border-color: #fff;
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.mode-btn.active {
+  background: var(--primary);
+  border-color: #fff;
+  color: #fff;
+  box-shadow: 0 0 18px rgba(255, 0, 0, 0.35);
+}
+
+.leaderboard-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.refresh-rank-btn {
+  width: 36px;
+  height: 36px;
+  font-size: 1.1rem;
+}
+
+.leaderboard-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.leaderboard-row {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  min-height: 40px;
+  padding: 0.65rem 0.8rem;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+}
+
+.leaderboard-row.current-student {
+  border-color: var(--primary);
+  background: rgba(255, 0, 0, 0.12);
+}
+
+.rank-position {
+  color: var(--warning);
+  font-weight: 900;
+}
+
+.rank-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 700;
+}
+
+.rank-score {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.leaderboard-empty {
+  color: var(--text-muted);
+  padding: 1rem 0;
 }
 
 .survivor-banner {
@@ -705,6 +869,27 @@ header {
 }
 
 @media (max-width: 640px) {
+  #app {
+    padding: 1.25rem;
+  }
+
+  .home-dashboard {
+    grid-template-columns: 1fr;
+  }
+
+  .leaderboard-row {
+    grid-template-columns: 42px minmax(0, 1fr);
+  }
+
+  .rank-score {
+    grid-column: 2;
+  }
+
+  .user-stats {
+    width: 100%;
+    justify-content: space-between;
+  }
+
   .options-grid {
     grid-template-columns: 1fr;
   }
