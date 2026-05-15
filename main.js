@@ -3,6 +3,7 @@ import { topics } from './src/data/topics.js';
 import { questionWordsData } from './src/data/questionWords.js';
 import { verbToBeData } from './src/data/verbToBe.js';
 import { computerStuffData } from './src/data/computerStuff.js';
+import { instructionsData } from './src/data/instructions.js';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -34,7 +35,8 @@ const SHIELD_EVERY_STREAK = 10;
 const topicQuestionMap = {
   'question-words': questionWordsData,
   'verb-to-be': verbToBeData,
-  'computer-stuff': computerStuffData
+  'computer-stuff': computerStuffData,
+  'instructions': instructionsData
 };
 
 const allQuestionData = Object.entries(topicQuestionMap).flatMap(([topicId, questions]) =>

@@ -19,5 +19,12 @@ export const topics = [
     description: 'Vocabulário essencial de tecnologia.',
     icon: '💻',
     color: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)'
+  },
+  {
+    id: 'instructions',
+    title: 'Instructions & Commands',
+    description: 'Aprenda a dar e entender instruções em inglês.',
+    icon: '📋',
+    color: 'linear-gradient(135deg, #f6d365 0%, #fda085 100%)'
   }
 ];
