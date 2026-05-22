@@ -369,8 +369,35 @@ function renderHome() {
   state.currentView = 'home';
   const mainContent = document.getElementById('main-content');
 
+  const totalQuestions = allQuestionData.length;
+  const progressPercent = Math.min(100, (state.userStats.totalCorrect / totalQuestions * 100).toFixed(0));
+
   mainContent.innerHTML = `
     <div class="home-container">
+      <div class="gamification-row">
+        <div class="stat-card">
+          <div class="stat-icon">🔥</div>
+          <div class="stat-info">
+            <h4>Sequência</h4>
+            <p>${state.streak} Dias</p>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon">🎯</div>
+          <div class="stat-info">
+            <h4>Precisão</h4>
+            <p>${state.userStats.totalCorrect} Acertos</p>
+          </div>
+        </div>
+        <div class="stat-card">
+          <div class="stat-icon">🏆</div>
+          <div class="stat-info">
+            <h4>Seu Posto</h4>
+            <p>#${state.leaderboard.findIndex(s => s.id === state.user.uid) + 1 || '--'}</p>
+          </div>
+        </div>
+      </div>
+
       <div class="home-dashboard">
         ${renderAnswerModePanel()}
         ${renderLeaderboard()}
@@ -380,8 +407,13 @@ function renderHome() {
         <div class="survivor-content">
           <h2>MODO SOBREVIVENTE ⏳</h2>
           <p>O tempo não para! Acerte para ganhar segundos, até o teto de ${MAX_SURVIVOR_TIME}s.</p>
-          <div class="best-score">MELHOR PONTUAÇÃO: ${state.userStats.survivorBest || 0}</div>
+          <div class="best-score">RECORDE PESSOAL: ${state.userStats.survivorBest || 0} PTS</div>
         </div>
+      </div>
+
+      <div class="section-title" style="display: flex; justify-content: space-between; align-items: center; margin-top: 1rem;">
+        <h3 style="font-size: 1.5rem; font-weight: 800;">Explorar Tópicos</h3>
+        <span class="progress-pill" style="background: rgba(255,255,255,0.05); padding: 0.4rem 1rem; border-radius: 50px; font-size: 0.8rem; font-weight: 700; border: 1px solid var(--glass-border); color: var(--primary);">${progressPercent}% concluído</span>
       </div>
 
       <div class="topic-grid">
