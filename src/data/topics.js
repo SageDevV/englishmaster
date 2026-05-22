@@ -26,5 +26,12 @@ export const topics = [
     description: 'Aprenda a dar e entender instruções em inglês.',
     icon: '📋',
     color: 'linear-gradient(135deg, #f6d365 0%, #fda085 100%)'
+  },
+  {
+    id: 'tech-life',
+    title: 'Tech Life',
+    description: 'Perguntas e respostas sobre tecnologia.',
+    icon: '🌐',
+    color: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)'
   }
 ];

@@ -4,6 +4,7 @@ import { questionWordsData } from './src/data/questionWords.js';
 import { verbToBeData } from './src/data/verbToBe.js';
 import { computerStuffData } from './src/data/computerStuff.js';
 import { instructionsData } from './src/data/instructions.js';
+import { techLifeData } from './src/data/techLife.js';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -36,7 +37,8 @@ const topicQuestionMap = {
   'question-words': questionWordsData,
   'verb-to-be': verbToBeData,
   'computer-stuff': computerStuffData,
-  'instructions': instructionsData
+  'instructions': instructionsData,
+  'tech-life': techLifeData
 };
 
 const allQuestionData = Object.entries(topicQuestionMap).flatMap(([topicId, questions]) =>
@@ -90,20 +92,26 @@ const state = {
 auth.onAuthStateChanged(async (user) => {
   try {
     if (user) {
+      console.log("Usuário autenticado:", user.email);
       state.user = user;
-      await loadProgressFromFirestore(user.uid);
-      await saveProgressToFirestore();
+      
+      const loadSuccess = await loadProgressFromFirestore(user.uid);
+      
+      if (loadSuccess) {
+        // Só salvamos se conseguimos carregar com sucesso (ou se é novo usuário)
+        // Isso evita sobrescrever dados reais com o estado padrão em caso de erro de rede
+        await saveProgressToFirestore();
+      }
+      
       await loadLeaderboardFromFirestore();
       state.currentView = 'home';
     } else {
       state.user = null;
       state.currentView = 'login';
+      state.userStats = createDefaultStats(); // Limpa estado local ao deslogar
     }
   } catch (error) {
-    console.error("Erro ao processar login/progresso:", error);
-    if (user) {
-      state.currentView = 'home';
-    }
+    console.error("Erro crítico no observer de auth:", error);
   } finally {
     renderApp();
   }
@@ -115,11 +123,11 @@ function normalizeStats(data = {}) {
   const normalized = {
     ...defaults,
     ...data,
-    level: Number(data.level || defaults.level),
-    xp: Number(data.xp || defaults.xp),
-    survivorBest: Number(data.survivorBest || defaults.survivorBest),
-    totalCorrect: Number(data.totalCorrect || defaults.totalCorrect),
-    quizzesCompleted: Number(data.quizzesCompleted || defaults.quizzesCompleted),
+    level: Math.max(1, Number(data.level || defaults.level)),
+    xp: Math.max(0, Number(data.xp || defaults.xp)),
+    survivorBest: Math.max(0, Number(data.survivorBest || defaults.survivorBest)),
+    totalCorrect: Math.max(0, Number(data.totalCorrect || defaults.totalCorrect)),
+    quizzesCompleted: Math.max(0, Number(data.quizzesCompleted || defaults.quizzesCompleted)),
     topicHistory: data.topicHistory || defaults.topicHistory
   };
 
@@ -128,7 +136,10 @@ function normalizeStats(data = {}) {
 }
 
 function calculateRankingScore(stats) {
-  const totalXp = ((stats.level || 1) - 1) * XP_PER_LEVEL + (stats.xp || 0);
+  const levelXP = (Math.max(1, stats.level) - 1) * XP_PER_LEVEL;
+  const currentXP = Math.max(0, stats.xp);
+  const totalXp = levelXP + currentXP;
+  
   return totalXp + (stats.totalCorrect || 0) * 2 + (stats.survivorBest || 0) * 10;
 }
 
@@ -148,11 +159,23 @@ function getUserProfilePayload() {
 
 async function loadProgressFromFirestore(uid) {
   try {
+    console.log("Carregando progresso do Firestore...");
     const doc = await db.collection('users').doc(uid).get();
-    state.userStats = doc.exists ? normalizeStats(doc.data()) : createDefaultStats();
+    
+    if (doc.exists) {
+      const data = doc.data();
+      console.log("Dados carregados com sucesso:", data);
+      state.userStats = normalizeStats(data);
+      return true;
+    } else {
+      console.log("Nenhum dado encontrado para este usuário. Iniciando novo perfil.");
+      state.userStats = createDefaultStats();
+      return true;
+    }
   } catch (error) {
-    console.warn("Firestore nao disponivel, usando estado local:", error);
-    state.userStats = normalizeStats(state.userStats);
+    console.error("Erro ao carregar do Firestore:", error);
+    // Se falhar a comunicação, mantemos o que temos mas avisamos que não foi carregado
+    return false;
   }
 }
 
@@ -160,9 +183,12 @@ async function saveProgressToFirestore() {
   if (!state.user) return;
 
   try {
-    await db.collection('users').doc(state.user.uid).set(getUserProfilePayload(), { merge: true });
+    const payload = getUserProfilePayload();
+    await db.collection('users').doc(state.user.uid).set(payload, { merge: true });
+    console.log("Progresso salvo com sucesso.");
   } catch (error) {
-    console.warn("Nao foi possivel salvar no Firestore:", error);
+    console.error("Erro ao salvar no Firestore:", error);
+    // Se falhar o save, o usuário continua jogando localmente
   }
 }
 
