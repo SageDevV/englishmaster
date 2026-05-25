@@ -53,8 +53,10 @@ function createDefaultStats() {
   return {
     xp: 0,
     level: 1,
+    nickname: '',
     topicHistory: {},
     survivorBest: 0,
+    speedrunBestTime: null,
     totalCorrect: 0,
     quizzesCompleted: 0,
     rankingScore: 0
@@ -77,6 +79,8 @@ const state = {
   timeLeft: SURVIVOR_START_TIME,
   timerId: null,
   isSurvivor: false,
+  isSpeedrun: false,
+  speedrunTime: 0,
   survivorTier: 'bronze',
   shields: 0,
   lastQuestionStartTime: 0,
@@ -126,6 +130,7 @@ function normalizeStats(data = {}) {
     level: Math.max(1, Number(data.level || defaults.level)),
     xp: Math.max(0, Number(data.xp || defaults.xp)),
     survivorBest: Math.max(0, Number(data.survivorBest || defaults.survivorBest)),
+    speedrunBestTime: data.speedrunBestTime !== undefined ? data.speedrunBestTime : defaults.speedrunBestTime,
     totalCorrect: Math.max(0, Number(data.totalCorrect || defaults.totalCorrect)),
     quizzesCompleted: Math.max(0, Number(data.quizzesCompleted || defaults.quizzesCompleted)),
     topicHistory: data.topicHistory || defaults.topicHistory
@@ -150,6 +155,7 @@ function getUserProfilePayload() {
   return {
     ...state.userStats,
     displayName: state.user?.displayName || 'Aluno',
+    nickname: state.userStats.nickname || '',
     photoURL: state.user?.photoURL || '',
     email: state.user?.email || '',
     rankingScore,
@@ -166,6 +172,8 @@ async function loadProgressFromFirestore(uid) {
       const data = doc.data();
       console.log("Dados carregados com sucesso:", data);
       state.userStats = normalizeStats(data);
+      // Garantir que o nickname seja carregado
+      state.userStats.nickname = data.nickname || '';
       return true;
     } else {
       console.log("Nenhum dado encontrado para este usuário. Iniciando novo perfil.");
@@ -174,7 +182,6 @@ async function loadProgressFromFirestore(uid) {
     }
   } catch (error) {
     console.error("Erro ao carregar do Firestore:", error);
-    // Se falhar a comunicação, mantemos o que temos mas avisamos que não foi carregado
     return false;
   }
 }
@@ -188,7 +195,6 @@ async function saveProgressToFirestore() {
     console.log("Progresso salvo com sucesso.");
   } catch (error) {
     console.error("Erro ao salvar no Firestore:", error);
-    // Se falhar o save, o usuário continua jogando localmente
   }
 }
 
@@ -202,13 +208,17 @@ async function loadLeaderboardFromFirestore() {
       .limit(10)
       .get();
 
-    state.leaderboard = snapshot.docs.map((doc, index) => ({
-      id: doc.id,
-      rank: index + 1,
-      ...normalizeStats(doc.data()),
-      displayName: doc.data().displayName || 'Aluno',
-      photoURL: doc.data().photoURL || ''
-    }));
+    state.leaderboard = snapshot.docs.map((doc, index) => {
+      const data = doc.data();
+      return {
+        id: doc.id,
+        rank: index + 1,
+        ...normalizeStats(data),
+        displayName: data.displayName || 'Aluno',
+        nickname: data.nickname || '',
+        photoURL: data.photoURL || ''
+      };
+    });
   } catch (error) {
     console.warn("Nao foi possivel carregar o ranking:", error);
     state.leaderboard = [];
@@ -227,6 +237,38 @@ window.loginWithGoogle = () => {
 window.logout = () => {
   stopTimer();
   auth.signOut();
+};
+
+window.openNicknameModal = () => {
+  const modal = document.getElementById('nickname-modal');
+  const input = document.getElementById('nickname-input');
+  if (modal && input) {
+    input.value = state.userStats.nickname || '';
+    modal.style.display = 'flex';
+  }
+};
+
+window.closeNicknameModal = () => {
+  const modal = document.getElementById('nickname-modal');
+  if (modal) modal.style.display = 'none';
+};
+
+window.saveNickname = async (event) => {
+  event.preventDefault();
+  const input = document.getElementById('nickname-input');
+  const nickname = input.value.trim();
+  
+  if (!nickname) {
+    alert("Por favor, digite um nickname.");
+    return;
+  }
+
+  state.userStats.nickname = nickname;
+  await saveProgressToFirestore();
+  window.closeNicknameModal();
+  renderApp();
+  await loadLeaderboardFromFirestore();
+  if (state.currentView === 'home') renderHome();
 };
 
 // --- Utility ---
@@ -344,13 +386,17 @@ function updateHeader() {
 
   const photoURL = state.user.photoURL || '';
   const displayName = escapeHtml(state.user.displayName || 'Aluno');
+  const nickname = escapeHtml(state.userStats.nickname || displayName);
   const xpPercent = Math.min(100, (state.userStats.xp / XP_PER_LEVEL) * 100);
 
   headerTop.innerHTML = `
     <div class="user-profile">
       ${photoURL ? `<img src="${escapeHtml(photoURL)}" class="user-avatar" alt="Profile">` : '<div class="user-avatar avatar-fallback">A</div>'}
       <div style="text-align: left">
-        <div style="font-weight: 700; font-size: 0.9rem">${displayName}</div>
+        <div style="display: flex; align-items: center">
+          <div style="font-weight: 700; font-size: 0.9rem">${nickname}</div>
+          <button class="edit-nickname-btn" onclick="window.openNicknameModal()" title="Editar Nickname">✏️</button>
+        </div>
         <button class="logout-btn" onclick="window.logout()">Sair</button>
       </div>
     </div>
@@ -403,11 +449,20 @@ function renderHome() {
         ${renderLeaderboard()}
       </div>
 
-      <div class="survivor-banner" onclick="window.startSurvivor()">
-        <div class="survivor-content">
-          <h2>MODO SOBREVIVENTE ⏳</h2>
-          <p>O tempo não para! Acerte para ganhar segundos, até o teto de ${MAX_SURVIVOR_TIME}s.</p>
-          <div class="best-score">RECORDE PESSOAL: ${state.userStats.survivorBest || 0} PTS</div>
+      <div class="special-modes-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+        <div class="survivor-banner" onclick="window.startSurvivor()">
+          <div class="survivor-content">
+            <h2>SOBREVIVENTE ⏳</h2>
+            <p>Acerte para ganhar tempo!</p>
+            <div class="best-score">RECORDE: ${state.userStats.survivorBest || 0}</div>
+          </div>
+        </div>
+        <div class="speedrun-banner" onclick="window.startSpeedrun()">
+          <div class="survivor-content">
+            <h2>SPEEDRUN ⚡</h2>
+            <p>3 perguntas por tópico. Seja rápido!</p>
+            <div class="best-score">MELHOR: ${state.userStats.speedrunBestTime ? formatTime(state.userStats.speedrunBestTime) : '--:--'}</div>
+          </div>
         </div>
       </div>
 
@@ -453,6 +508,21 @@ function renderHome() {
         <button class="close-modal" onclick="window.closeDifficultyModal()">Cancelar</button>
       </div>
     </div>
+
+    <div id="nickname-modal" class="modal">
+      <div class="modal-content">
+        <h2>Seu Nickname</h2>
+        <p>Como você quer ser chamado no ranking?</p>
+        <form onsubmit="window.saveNickname(event)">
+          <div class="nickname-input-group">
+            <label for="nickname-input">Nickname</label>
+            <input type="text" id="nickname-input" class="nickname-field" maxlength="20" placeholder="Ex: MasterEnglish">
+          </div>
+          <button type="submit" class="next-btn">Salvar Nickname</button>
+        </form>
+        <button class="close-modal" onclick="window.closeNicknameModal()">Cancelar</button>
+      </div>
+    </div>
   `;
 }
 
@@ -477,13 +547,15 @@ function renderAnswerModePanel() {
 
 function renderLeaderboard() {
   const rows = state.leaderboard.length
-    ? state.leaderboard.map(student => `
+    ? state.leaderboard.map(student => {
+        const nameToShow = escapeHtml(student.nickname || student.displayName || 'Aluno');
+        return `
         <div class="leaderboard-row ${student.id === state.user.uid ? 'current-student' : ''}">
           <span class="rank-position">#${student.rank}</span>
-          <span class="rank-name">${escapeHtml(student.displayName)}</span>
+          <span class="rank-name">${nameToShow}</span>
           <span class="rank-score">${student.rankingScore || 0} pts</span>
         </div>
-      `).join('')
+      `}).join('')
     : '<div class="leaderboard-empty">Ranking indisponível no momento.</div>';
 
   return `
@@ -506,23 +578,25 @@ function renderQuiz() {
   }
 
   const totalQuestions = state.isSurvivor ? 1 : state.questionQueue.length;
-  const progress = state.isSurvivor ? 100 : (state.currentQuestionIndex / totalQuestions) * 100;
+  const progress = state.isSurvivor ? 100 : ((state.currentQuestionIndex + 1) / totalQuestions) * 100;
   const mainContent = document.getElementById('main-content');
 
   mainContent.innerHTML = `
-    <div class="quiz-container ${state.isSurvivor ? 'survivor-mode' : ''}">
+    <div class="quiz-container ${state.isSurvivor ? 'survivor-mode' : ''} ${state.isSpeedrun ? 'speedrun-mode' : ''}">
       <div id="streak-badge" class="streak-badge" style="display: ${state.streak >= 2 ? 'block' : 'none'}">
         🔥 COMBO X${state.streak}
       </div>
 
-      ${state.isSurvivor ? `
+      ${state.isSurvivor || state.isSpeedrun ? `
         <div class="survivor-header-stats">
-          <div class="timer-display ${state.timeLeft < 10 ? 'low-time' : ''} tier-${state.survivorTier}">
-            <span class="timer-icon">⏳</span> <span id="timer-seconds">${state.timeLeft}s</span>
+          <div class="timer-display ${!state.isSpeedrun && state.timeLeft < 10 ? 'low-time' : ''} ${state.isSpeedrun ? 'speedrun-timer' : `tier-${state.survivorTier}`}">
+            <span class="timer-icon">${state.isSpeedrun ? '⚡' : '⏳'}</span> <span id="timer-seconds">${state.isSpeedrun ? formatTime(state.speedrunTime) : state.timeLeft + 's'}</span>
           </div>
-          <div class="shield-display ${state.shields > 0 ? 'has-shields' : ''}">
-            🛡️ ${state.shields}/${MAX_SHIELDS}
-          </div>
+          ${state.isSurvivor ? `
+            <div class="shield-display ${state.shields > 0 ? 'has-shields' : ''}">
+              🛡️ ${state.shields}/${MAX_SHIELDS}
+            </div>
+          ` : ''}
         </div>
       ` : ''}
 
@@ -532,14 +606,14 @@ function renderQuiz() {
           <div class="progress-bar-fill" style="width: ${progress}%"></div>
         </div>
         <div class="score-display">
-          ${state.isSurvivor ? `NÍVEL: ${state.survivorTier.toUpperCase()}` : `PONTOS: ${state.score}`}
+          ${state.isSurvivor ? `NÍVEL: ${state.survivorTier.toUpperCase()}` : (state.isSpeedrun ? `${state.currentQuestionIndex + 1}/${totalQuestions}` : `PONTOS: ${state.score}`)}
         </div>
       </div>
 
       ${state.isSurvivor ? `<div class="survivor-score-overlay">${state.score}</div>` : ''}
 
       <div class="question-box">
-        <div class="difficulty-tag ${state.currentDifficulty}">${state.currentDifficulty.toUpperCase()}</div>
+        <div class="difficulty-tag ${state.isSpeedrun ? 'ouro' : state.currentDifficulty}">${state.isSpeedrun ? 'SPEEDRUN' : state.currentDifficulty.toUpperCase()}</div>
         <p class="question-text">${escapeHtml(question.question)}</p>
         ${state.answerMode === 'written' ? renderWrittenAnswerForm() : renderMultipleChoiceOptions(question)}
       </div>
@@ -600,7 +674,7 @@ function renderResults() {
   const percentage = state.isSurvivor ? 0 : Math.round((state.score / totalQuestions) * 100);
 
   let stars = 0;
-  if (!state.isSurvivor) {
+  if (!state.isSurvivor && !state.isSpeedrun) {
     if (percentage >= 100) stars = 3;
     else if (percentage >= 70) stars = 2;
     else if (percentage >= 40) stars = 1;
@@ -611,27 +685,37 @@ function renderResults() {
     }
     state.userStats.quizzesCompleted++;
     saveProgressToFirestore();
-  } else if (state.score > (state.userStats.survivorBest || 0)) {
+  } else if (state.isSurvivor && state.score > (state.userStats.survivorBest || 0)) {
     state.userStats.survivorBest = state.score;
     saveProgressToFirestore();
+  } else if (state.isSpeedrun) {
+    if (state.score === totalQuestions) { // Só salva recorde se acertar tudo
+      if (!state.userStats.speedrunBestTime || state.speedrunTime < state.userStats.speedrunBestTime) {
+        state.userStats.speedrunBestTime = state.speedrunTime;
+        saveProgressToFirestore();
+      }
+    }
   }
 
   const mainContent = document.getElementById('main-content');
   mainContent.innerHTML = `
-    <div class="quiz-container result-screen ${state.isSurvivor ? 'survivor-results' : ''}">
+    <div class="quiz-container result-screen ${state.isSurvivor ? 'survivor-results' : ''} ${state.isSpeedrun ? 'speedrun-results' : ''}">
       <h2>${getResultTitle()}</h2>
 
-      ${!state.isSurvivor ? `
+      ${!state.isSurvivor && !state.isSpeedrun ? `
         <div class="topic-stars" style="justify-content: center; font-size: 3rem; margin: 1rem 0">
           ${Array.from({ length: 3 }).map((_, i) => `
             <span class="${i < stars ? 'star-filled' : 'star-empty'}">★</span>
           `).join('')}
         </div>
         <div class="score-circle">${percentage}%</div>
+      ` : (state.isSpeedrun ? `
+        <div class="time-big">${formatTime(state.speedrunTime)}</div>
+        <p>Tempo Total</p>
       ` : `
         <div class="survivor-score-big">${state.score}</div>
         <p>Questões respondidas</p>
-      `}
+      `)}
 
       <p style="font-size: 1.2rem; margin-bottom: 2rem">
         ${state.isSurvivor
@@ -643,12 +727,13 @@ function renderResults() {
     </div>
   `;
 
-  if (stars === 3 || (state.isSurvivor && state.score > 20)) {
+  if (stars === 3 || (state.isSurvivor && state.score > 20) || (state.isSpeedrun && state.score === totalQuestions)) {
     launchConfetti({ particleCount: 200, spread: 100, origin: { y: 0.6 } });
   }
 }
 
 function getResultTitle() {
+  if (state.isSpeedrun) return 'Speedrun Concluído!';
   if (!state.isSurvivor) return 'Quiz Finalizado!';
   if (state.resultReason === 'wrong') return 'Você errou!';
   if (state.resultReason === 'time') return 'Tempo Esgotado!';
@@ -748,6 +833,7 @@ window.startQuiz = (topicId, difficulty) => {
 
 window.startSurvivor = () => {
   state.isSurvivor = true;
+  state.isSpeedrun = false;
   state.survivorTier = 'bronze';
   state.currentDifficulty = 'bronze';
   state.currentView = 'quiz';
@@ -767,30 +853,79 @@ window.startSurvivor = () => {
   renderApp();
 };
 
+window.startSpeedrun = () => {
+  state.isSurvivor = false;
+  state.isSpeedrun = true;
+  state.currentView = 'quiz';
+  state.score = 0;
+  state.streak = 0;
+  state.speedrunTime = 0;
+  state.currentQuestionIndex = 0;
+  state.isAnswered = false;
+  state.selectedAnswer = null;
+  state.resultReason = 'completed';
+
+  // Selecionar até 3 perguntas aleatórias por tópico
+  const speedrunQuestions = [];
+  topics.forEach(topic => {
+    const topicPool = allQuestionData.filter(q => q.topicId === topic.id);
+    const shuffledPool = shuffleArray(topicPool);
+    const selected = shuffledPool.slice(0, 3);
+    speedrunQuestions.push(...selected);
+  });
+
+  state.questionQueue = shuffleArray(speedrunQuestions).map(withShuffledOptions);
+
+  if (!state.questionQueue.length) {
+    alert("Nenhuma pergunta disponível para o modo Speedrun.");
+    return;
+  }
+
+  startTimer();
+  renderApp();
+};
+
 function startTimer() {
   stopTimer();
   state.timerId = setInterval(() => {
-    state.timeLeft--;
-    updateTimerDisplay();
+    if (state.isSpeedrun) {
+      state.speedrunTime++;
+      updateTimerDisplay();
+    } else {
+      state.timeLeft--;
+      updateTimerDisplay();
 
-    if (state.timeLeft <= 0) {
-      state.resultReason = 'time';
-      renderResults();
+      if (state.timeLeft <= 0) {
+        state.resultReason = 'time';
+        renderResults();
+      }
     }
   }, 1000);
+}
+
+function formatTime(seconds) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
 function updateTimerDisplay() {
   const timerEl = document.getElementById('timer-seconds');
   if (!timerEl) return;
 
-  timerEl.innerText = state.timeLeft + 's';
-  if (state.timeLeft < 10) timerEl.parentElement.classList.add('low-time');
+  if (state.isSpeedrun) {
+    timerEl.innerText = formatTime(state.speedrunTime);
+  } else {
+    timerEl.innerText = state.timeLeft + 's';
+    if (state.timeLeft < 10) timerEl.parentElement.classList.add('low-time');
+  }
 }
 
 window.goHome = async () => {
   stopTimer();
   state.currentView = 'home';
+  state.isSurvivor = false;
+  state.isSpeedrun = false;
   await loadLeaderboardFromFirestore();
   renderApp();
 };
