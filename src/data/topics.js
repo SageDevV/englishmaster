@@ -33,5 +33,12 @@ export const topics = [
     description: 'Perguntas e respostas sobre tecnologia.',
     icon: '🌐',
     color: 'linear-gradient(135deg, #a8edea 0%, #fed6e3 100%)'
+  },
+  {
+    id: 'connectivity',
+    title: 'Online Connectivity',
+    description: 'Comunicação, fóruns e etiqueta na rede.',
+    icon: '📶',
+    color: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
   }
 ];

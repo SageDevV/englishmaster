@@ -5,6 +5,7 @@ import { verbToBeData } from './src/data/verbToBe.js';
 import { computerStuffData } from './src/data/computerStuff.js';
 import { instructionsData } from './src/data/instructions.js';
 import { techLifeData } from './src/data/techLife.js';
+import { connectivityData } from './src/data/connectivity.js';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -38,7 +39,8 @@ const topicQuestionMap = {
   'verb-to-be': verbToBeData,
   'computer-stuff': computerStuffData,
   'instructions': instructionsData,
-  'tech-life': techLifeData
+  'tech-life': techLifeData,
+  'connectivity': connectivityData
 };
 
 const allQuestionData = Object.entries(topicQuestionMap).flatMap(([topicId, questions]) =>
