@@ -6,7 +6,7 @@ import { computerStuffData } from './src/data/computerStuff.js';
 import { instructionsData } from './src/data/instructions.js';
 import { techLifeData } from './src/data/techLife.js';
 import { connectivityData } from './src/data/connectivity.js';
-import { numeralsData, numeralsTrack } from './src/data/numerals.js';
+import { numeralsData } from './src/data/numerals.js';
 import {
   buildSpeedrunQuestionQueue,
   formatElapsedTime,
@@ -69,7 +69,6 @@ function createDefaultStats() {
     xp: 0,
     level: 1,
     topicHistory: {},
-    trackProgress: {},
     survivorBest: 0,
     speedrunBestTime: 0,
     speedrunBestCorrect: 0,
@@ -109,15 +108,7 @@ const state = {
   resultReason: 'completed',
   resultPersisted: false,
   leaderboard: [],
-  userStats: createDefaultStats(),
-  // --- Learning track state ---
-  isTrackQuiz: false,
-  currentStageIndex: 0,
-  trackStep: 'lesson',
-  trackExerciseIndex: 0,
-  trackExerciseAnswered: false,
-  trackSelectedExercise: null,
-  trackStageCorrect: 0
+  userStats: createDefaultStats()
 };
 
 // --- Auth Observers ---
@@ -166,8 +157,7 @@ function normalizeStats(data = {}) {
     speedrunLastResult: data.speedrunLastResult || defaults.speedrunLastResult,
     totalCorrect: Math.max(0, Number(data.totalCorrect || defaults.totalCorrect)),
     quizzesCompleted: Math.max(0, Number(data.quizzesCompleted || defaults.quizzesCompleted)),
-    topicHistory: data.topicHistory || defaults.topicHistory,
-    trackProgress: data.trackProgress || defaults.trackProgress
+    topicHistory: data.topicHistory || defaults.topicHistory
   };
 
   normalized.rankingScore = calculateRankingScore(normalized);
@@ -468,8 +458,6 @@ function renderApp() {
   updateHeader();
   if (state.currentView === 'home') renderHome();
   else if (state.currentView === 'quiz') renderQuiz();
-  else if (state.currentView === 'track') renderTrackOverview();
-  else if (state.currentView === 'track-stage') renderTrackStage();
 }
 
 function renderLogin() {
@@ -596,30 +584,16 @@ function renderHome() {
       <div class="topic-grid">
         ${topics.map(topic => {
           const history = state.userStats.topicHistory[topic.id] || { stars: 0 };
-          const isTrack = topic.type === 'track';
-          const trackProgress = state.userStats.trackProgress?.[topic.id] || { completedStages: [] };
-          const totalStages = isTrack ? numeralsTrack.stages.length : 0;
-          const doneStages = isTrack ? (trackProgress.completedStages || []).length : 0;
-          const clickHandler = topic.locked
-            ? ''
-            : isTrack
-              ? `window.openTrack('${topic.id}')`
-              : `window.openDifficultyModal('${topic.id}')`;
           return `
-          <div class="topic-card ${topic.locked ? 'locked' : ''} ${isTrack ? 'track-card' : ''}"
+          <div class="topic-card ${topic.locked ? 'locked' : ''}"
                style="--card-color: ${topic.color}"
-               onclick="${clickHandler}">
-            ${isTrack ? '<div class="track-badge">TRILHA</div>' : ''}
+               onclick="${topic.locked ? '' : `window.openDifficultyModal('${topic.id}')`}">
             <div class="topic-icon">${topic.icon}</div>
-            ${isTrack ? `
-              <div class="track-progress-mini">${doneStages}/${totalStages} etapas</div>
-            ` : `
-              <div class="topic-stars">
-                ${Array.from({ length: 3 }).map((_, i) => `
-                  <span class="${i < history.stars ? 'star-filled' : 'star-empty'}">★</span>
-                `).join('')}
-              </div>
-            `}
+            <div class="topic-stars">
+              ${Array.from({ length: 3 }).map((_, i) => `
+                <span class="${i < history.stars ? 'star-filled' : 'star-empty'}">★</span>
+              `).join('')}
+            </div>
             <h3>${escapeHtml(topic.title)}</h3>
             <p>${escapeHtml(topic.description)}</p>
           </div>
@@ -743,7 +717,7 @@ function renderQuiz() {
   const totalQuestions = state.isSurvivor ? 1 : state.questionQueue.length;
   const progress = state.isSurvivor ? 100 : (state.currentQuestionIndex / totalQuestions) * 100;
   const quizModeClass = state.isSurvivor ? 'survivor-mode' : state.isSpeedrun ? 'speedrun-mode' : '';
-  const difficulty = (state.isSpeedrun || state.isTrackQuiz) ? question.difficulty : state.currentDifficulty;
+  const difficulty = state.isSpeedrun ? question.difficulty : state.currentDifficulty;
   const scoreLabel = state.isSurvivor
     ? `NÍVEL: ${state.survivorTier.toUpperCase()}`
     : state.isSpeedrun
@@ -847,11 +821,6 @@ function renderEmptyQuiz() {
 }
 
 function renderResults() {
-  if (state.isTrackQuiz) {
-    renderTrackQuizResults();
-    return;
-  }
-
   if (state.isSpeedrun) {
     state.speedrunTime = getSpeedrunElapsedSeconds();
   }
@@ -1172,7 +1141,6 @@ window.goHome = async () => {
   state.currentView = 'home';
   state.isSurvivor = false;
   state.isSpeedrun = false;
-  state.isTrackQuiz = false;
   state.speedrunStartedAt = 0;
   await loadLeaderboardFromFirestore();
   renderApp();
@@ -1224,7 +1192,7 @@ function handleCorrectAnswer() {
     state.shields = Math.min(MAX_SHIELDS, state.shields + 1);
   }
 
-  const activeDifficulty = (state.isSpeedrun || state.isTrackQuiz) ? getCurrentQuestion()?.difficulty : state.currentDifficulty;
+  const activeDifficulty = state.isSpeedrun ? getCurrentQuestion()?.difficulty : state.currentDifficulty;
   let xpGain = XP_CORRECT;
   if (activeDifficulty === 'prata') xpGain *= 1.5;
   if (activeDifficulty === 'ouro') xpGain *= 2;
@@ -1279,7 +1247,7 @@ function goToNextQuestion() {
 
   if (state.currentQuestionIndex < state.questionQueue.length - 1) {
     state.currentQuestionIndex++;
-    if (state.isSpeedrun || state.isTrackQuiz) {
+    if (state.isSpeedrun) {
       state.currentDifficulty = state.questionQueue[state.currentQuestionIndex]?.difficulty || state.currentDifficulty;
     }
     renderQuiz();
@@ -1288,345 +1256,6 @@ function goToNextQuestion() {
     renderResults();
   }
 }
-
-// =============================================================
-//  Learning Track (Trilha) — aulas guiadas, vocabulário,
-//  exercícios interativos, progressão por etapas e quiz final.
-// =============================================================
-function getTrackProgress() {
-  if (!state.userStats.trackProgress) state.userStats.trackProgress = {};
-  if (!state.userStats.trackProgress[numeralsTrack.id]) {
-    state.userStats.trackProgress[numeralsTrack.id] = { completedStages: [], finalQuizBest: 0 };
-  }
-  const progress = state.userStats.trackProgress[numeralsTrack.id];
-  if (!Array.isArray(progress.completedStages)) progress.completedStages = [];
-  return progress;
-}
-
-function isStageCompleted(stageId) {
-  return getTrackProgress().completedStages.includes(stageId);
-}
-
-function isStageUnlocked(index) {
-  if (index === 0) return true;
-  return isStageCompleted(numeralsTrack.stages[index - 1].id);
-}
-
-function allStagesCompleted() {
-  return numeralsTrack.stages.every(stage => isStageCompleted(stage.id));
-}
-
-window.openTrack = (topicId) => {
-  stopTimer();
-  state.isTrackQuiz = false;
-  state.isSurvivor = false;
-  state.isSpeedrun = false;
-  state.currentView = 'track';
-  state.currentTopic = topicId || numeralsTrack.id;
-  renderApp();
-};
-
-function renderTrackOverview() {
-  state.currentView = 'track';
-  const progress = getTrackProgress();
-  const done = progress.completedStages.length;
-  const total = numeralsTrack.stages.length;
-  const percent = Math.round((done / total) * 100);
-  const finalUnlocked = allStagesCompleted();
-  const mainContent = document.getElementById('main-content');
-
-  mainContent.innerHTML = `
-    <div class="track-container">
-      <div class="track-hero">
-        <button class="back-btn" onclick="window.goHome()">← Início</button>
-        <div class="track-hero-icon">${numeralsTrack.icon}</div>
-        <h2>${escapeHtml(numeralsTrack.title)}</h2>
-        <p class="track-intro">${escapeHtml(numeralsTrack.intro)}</p>
-        <div class="track-overall-progress">
-          <div class="track-progress-bar"><div class="track-progress-fill" style="width:${percent}%"></div></div>
-          <span>${done}/${total} etapas concluídas</span>
-        </div>
-      </div>
-
-      <div class="track-stage-list">
-        ${numeralsTrack.stages.map((stage, index) => {
-          const completed = isStageCompleted(stage.id);
-          const unlocked = isStageUnlocked(index);
-          return `
-            <div class="track-stage-item ${completed ? 'completed' : ''} ${!unlocked ? 'locked' : ''}"
-                 onclick="${unlocked ? `window.openStage(${index})` : ''}">
-              <div class="stage-number">${completed ? '✓' : unlocked ? index + 1 : '🔒'}</div>
-              <div class="stage-info">
-                <h3>${stage.icon} ${escapeHtml(stage.title)}</h3>
-                <p>${escapeHtml(stage.subtitle)}</p>
-              </div>
-              <div class="stage-status">${completed ? 'Concluída' : unlocked ? 'Começar' : 'Bloqueada'}</div>
-            </div>
-          `;
-        }).join('')}
-
-        <div class="track-stage-item final-quiz ${finalUnlocked ? '' : 'locked'}"
-             onclick="${finalUnlocked ? 'window.startTrackFinalQuiz()' : ''}">
-          <div class="stage-number">${finalUnlocked ? '🏁' : '🔒'}</div>
-          <div class="stage-info">
-            <h3>🎓 Quiz Final da Trilha</h3>
-            <p>${progress.finalQuizBest ? `Revisão geral. Melhor resultado: ${progress.finalQuizBest}%` : 'Conclua todas as etapas para liberar a revisão geral.'}</p>
-          </div>
-          <div class="stage-status">${finalUnlocked ? 'Fazer quiz' : 'Bloqueado'}</div>
-        </div>
-      </div>
-    </div>
-  `;
-}
-
-window.openStage = (index) => {
-  state.currentStageIndex = index;
-  state.trackStep = 'lesson';
-  state.trackExerciseIndex = 0;
-  state.trackExerciseAnswered = false;
-  state.trackSelectedExercise = null;
-  state.trackStageCorrect = 0;
-  state.currentView = 'track-stage';
-  renderApp();
-};
-
-window.trackGoToStep = (step) => {
-  state.trackStep = step;
-  if (step === 'exercises') {
-    state.trackExerciseIndex = 0;
-    state.trackExerciseAnswered = false;
-    state.trackSelectedExercise = null;
-    state.trackStageCorrect = 0;
-  }
-  renderApp();
-};
-
-function renderTrackStage() {
-  state.currentView = 'track-stage';
-  const stage = numeralsTrack.stages[state.currentStageIndex];
-  if (!stage) {
-    window.openTrack(numeralsTrack.id);
-    return;
-  }
-
-  if (state.trackStep === 'lesson') renderStageLesson(stage);
-  else if (state.trackStep === 'vocabulary') renderStageVocabulary(stage);
-  else renderStageExercises(stage);
-}
-
-function stageStepHeader(stage, stepLabel) {
-  return `
-    <div class="track-stage-header">
-      <button class="back-btn" onclick="window.openTrack('${numeralsTrack.id}')">← Trilha</button>
-      <div class="stage-title-wrap">
-        <span class="stage-chip">${stage.icon} ${escapeHtml(stage.title)}</span>
-        <span class="stage-step-label">${escapeHtml(stepLabel)}</span>
-      </div>
-    </div>
-    <div class="track-steps-indicator">
-      <span class="${state.trackStep === 'lesson' ? 'active' : ''}">1. Aula</span>
-      <span class="${state.trackStep === 'vocabulary' ? 'active' : ''}">2. Vocabulário</span>
-      <span class="${state.trackStep === 'exercises' ? 'active' : ''}">3. Exercícios</span>
-    </div>
-  `;
-}
-
-function renderStageLesson(stage) {
-  const mainContent = document.getElementById('main-content');
-  mainContent.innerHTML = `
-    <div class="track-container stage-view">
-      ${stageStepHeader(stage, 'Aula')}
-      <div class="lesson-card">
-        <p class="lesson-intro">${escapeHtml(stage.lesson.intro)}</p>
-        <ul class="lesson-points">
-          ${stage.lesson.points.map(p => `<li>${escapeHtml(p)}</li>`).join('')}
-        </ul>
-        <h4 class="lesson-subhead">📌 Exemplos práticos de TI</h4>
-        <div class="lesson-examples">
-          ${stage.lesson.examples.map(ex => `
-            <div class="example-row">
-              <span class="example-en">🇺🇸 ${escapeHtml(ex.en)}</span>
-              <span class="example-pt">🇧🇷 ${escapeHtml(ex.pt)}</span>
-            </div>
-          `).join('')}
-        </div>
-      </div>
-      <div class="track-nav">
-        <button class="next-btn" onclick="window.trackGoToStep('vocabulary')">Ver vocabulário →</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderStageVocabulary(stage) {
-  const mainContent = document.getElementById('main-content');
-  mainContent.innerHTML = `
-    <div class="track-container stage-view">
-      ${stageStepHeader(stage, 'Vocabulário técnico bilíngue')}
-      <div class="vocab-grid">
-        ${stage.vocabulary.map(v => `
-          <div class="vocab-card">
-            <div class="vocab-top">
-              <span class="vocab-en">${escapeHtml(v.en)}</span>
-              <span class="vocab-pt">${escapeHtml(v.pt)}</span>
-            </div>
-            <div class="vocab-example">"${escapeHtml(v.example)}"</div>
-          </div>
-        `).join('')}
-      </div>
-      <div class="track-nav">
-        <button class="back-btn-secondary" onclick="window.trackGoToStep('lesson')">← Aula</button>
-        <button class="next-btn" onclick="window.trackGoToStep('exercises')">Fazer exercícios →</button>
-      </div>
-    </div>
-  `;
-}
-
-function renderStageExercises(stage) {
-  const mainContent = document.getElementById('main-content');
-  const exercises = stage.exercises;
-  const ex = exercises[state.trackExerciseIndex];
-  const total = exercises.length;
-  const answeredCorrectly = state.trackExerciseAnswered && ex.options[state.trackSelectedExercise] === ex.answer;
-
-  mainContent.innerHTML = `
-    <div class="track-container stage-view">
-      ${stageStepHeader(stage, `Exercício ${state.trackExerciseIndex + 1} de ${total}`)}
-      <div class="exercise-card">
-        <div class="progress-bar-wrap">
-          <div class="progress-bar-fill" style="width:${(state.trackExerciseIndex / total) * 100}%"></div>
-        </div>
-        <p class="exercise-question">${escapeHtml(ex.question)}</p>
-        <div class="options-grid">
-          ${ex.options.map((opt, i) => {
-            let cls = 'option-btn';
-            if (state.trackExerciseAnswered) {
-              if (opt === ex.answer) cls += ' correct';
-              else if (i === state.trackSelectedExercise) cls += ' incorrect';
-            }
-            return `<button class="${cls}" onclick="window.answerTrackExercise(${i})" ${state.trackExerciseAnswered ? 'disabled' : ''}>${escapeHtml(opt)}</button>`;
-          }).join('')}
-        </div>
-        ${state.trackExerciseAnswered ? `
-          <div class="exercise-feedback ${answeredCorrectly ? 'ok' : 'bad'}">
-            <strong>${answeredCorrectly ? '✓ Correto!' : '✗ Quase lá!'}</strong>
-            <span>${escapeHtml(ex.explanation)}</span>
-          </div>
-          <div class="track-nav">
-            <button class="next-btn" onclick="window.trackNextExercise()">
-              ${state.trackExerciseIndex < total - 1 ? 'Próximo exercício →' : 'Concluir etapa ✓'}
-            </button>
-          </div>
-        ` : ''}
-      </div>
-    </div>
-  `;
-}
-
-window.answerTrackExercise = (index) => {
-  if (state.trackExerciseAnswered) return;
-  const stage = numeralsTrack.stages[state.currentStageIndex];
-  const ex = stage.exercises[state.trackExerciseIndex];
-  state.trackExerciseAnswered = true;
-  state.trackSelectedExercise = index;
-
-  if (ex.options[index] === ex.answer) {
-    state.trackStageCorrect++;
-    addXP(10);
-    launchConfetti({ particleCount: 25, spread: 50, origin: { y: 0.8 }, colors: ['#43e97b', '#ffffff'] });
-  }
-
-  renderApp();
-};
-
-window.trackNextExercise = () => {
-  const stage = numeralsTrack.stages[state.currentStageIndex];
-  if (state.trackExerciseIndex < stage.exercises.length - 1) {
-    state.trackExerciseIndex++;
-    state.trackExerciseAnswered = false;
-    state.trackSelectedExercise = null;
-    renderApp();
-    return;
-  }
-  completeStage(stage);
-};
-
-function completeStage(stage) {
-  const progress = getTrackProgress();
-  if (!progress.completedStages.includes(stage.id)) {
-    progress.completedStages.push(stage.id);
-    addXP(30);
-  }
-  saveProgressToFirestore();
-  launchConfetti({ particleCount: 120, spread: 80, origin: { y: 0.6 }, colors: ['#43e97b', '#38f9d7', '#ffffff'] });
-  window.openTrack(numeralsTrack.id);
-}
-
-window.startTrackFinalQuiz = () => {
-  const queue = (numeralsTrack.finalQuiz || []).map(withShuffledOptions);
-  if (!queue.length) return;
-
-  state.currentTopic = numeralsTrack.id;
-  state.currentDifficulty = queue[0]?.difficulty || 'bronze';
-  state.currentView = 'quiz';
-  state.currentQuestionIndex = 0;
-  state.questionQueue = queue;
-  state.score = 0;
-  state.streak = 0;
-  state.isAnswered = false;
-  state.selectedAnswer = null;
-  state.isSurvivor = false;
-  state.isSpeedrun = false;
-  state.isTrackQuiz = true;
-  state.speedrunTime = 0;
-  state.speedrunStartedAt = 0;
-  state.resultReason = 'completed';
-  state.resultPersisted = false;
-  renderApp();
-};
-
-function renderTrackQuizResults() {
-  stopTimer();
-  const total = state.questionQueue.length;
-  const percentage = total ? Math.round((state.score / total) * 100) : 0;
-  const progress = getTrackProgress();
-
-  if (percentage > (progress.finalQuizBest || 0)) {
-    progress.finalQuizBest = percentage;
-  }
-  state.userStats.quizzesCompleted++;
-  saveProgressToFirestore();
-
-  let stars = 0;
-  if (percentage >= 100) stars = 3;
-  else if (percentage >= 70) stars = 2;
-  else if (percentage >= 40) stars = 1;
-
-  const mainContent = document.getElementById('main-content');
-  mainContent.innerHTML = `
-    <div class="quiz-container result-screen">
-      <h2>Quiz da Trilha Finalizado!</h2>
-      <div class="topic-stars" style="justify-content:center;font-size:3rem;margin:1rem 0">
-        ${Array.from({ length: 3 }).map((_, i) => `<span class="${i < stars ? 'star-filled' : 'star-empty'}">★</span>`).join('')}
-      </div>
-      <div class="score-circle">${percentage}%</div>
-      <p style="font-size:1.2rem;margin-bottom:2rem">Você acertou <strong>${state.score}</strong> de <strong>${total}</strong> perguntas.</p>
-      <div class="track-nav" style="justify-content:center">
-        <button class="next-btn" onclick="window.backToTrackFromQuiz()">Voltar à trilha</button>
-        <button class="back-btn-secondary" onclick="window.goHome()">Início</button>
-      </div>
-    </div>
-  `;
-
-  if (stars === 3) {
-    launchConfetti({ particleCount: 200, spread: 100, origin: { y: 0.6 } });
-  }
-}
-
-window.backToTrackFromQuiz = () => {
-  state.isTrackQuiz = false;
-  window.openTrack(numeralsTrack.id);
-};
 
 // Initialize
 renderApp();

@@ -44,9 +44,8 @@ export const topics = [
   {
     id: 'numerals-units',
     title: 'Numerals, Quantities & Units in IT',
-    description: 'Trilha guiada: números, quantidades e unidades de medida em TI.',
+    description: 'Números, quantidades e unidades de medida em TI.',
     icon: '🔢',
-    color: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
-    type: 'track'
+    color: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)'
   }
 ];
