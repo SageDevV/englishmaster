@@ -6,6 +6,15 @@ import { computerStuffData } from './src/data/computerStuff.js';
 import { instructionsData } from './src/data/instructions.js';
 import { techLifeData } from './src/data/techLife.js';
 import { connectivityData } from './src/data/connectivity.js';
+import { numeralsData, numeralsTrack } from './src/data/numerals.js';
+import {
+  buildSpeedrunQuestionQueue,
+  formatElapsedTime,
+  normalizeNicknameKey,
+  resolveProfileName,
+  sanitizeNickname,
+  validateNickname
+} from './src/services/gameServices.js';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -33,6 +42,7 @@ const SURVIVOR_START_TIME = 30;
 const MAX_SURVIVOR_TIME = 60;
 const MAX_SHIELDS = 3;
 const SHIELD_EVERY_STREAK = 10;
+const SPEEDRUN_MODE = 'speedrun';
 
 const topicQuestionMap = {
   'question-words': questionWordsData,
@@ -40,7 +50,8 @@ const topicQuestionMap = {
   'computer-stuff': computerStuffData,
   'instructions': instructionsData,
   'tech-life': techLifeData,
-  'connectivity': connectivityData
+  'connectivity': connectivityData,
+  'numerals-units': numeralsData
 };
 
 const allQuestionData = Object.entries(topicQuestionMap).flatMap(([topicId, questions]) =>
@@ -53,12 +64,17 @@ const allQuestionData = Object.entries(topicQuestionMap).flatMap(([topicId, ques
 
 function createDefaultStats() {
   return {
+    nickname: '',
+    nicknameKey: '',
     xp: 0,
     level: 1,
-    nickname: '',
     topicHistory: {},
+    trackProgress: {},
     survivorBest: 0,
-    speedrunBestTime: null,
+    speedrunBestTime: 0,
+    speedrunBestCorrect: 0,
+    speedrunAttempts: 0,
+    speedrunLastResult: null,
     totalCorrect: 0,
     quizzesCompleted: 0,
     rankingScore: 0
@@ -83,6 +99,7 @@ const state = {
   isSurvivor: false,
   isSpeedrun: false,
   speedrunTime: 0,
+  speedrunStartedAt: 0,
   survivorTier: 'bronze',
   shields: 0,
   lastQuestionStartTime: 0,
@@ -90,8 +107,17 @@ const state = {
   survivorAskedIds: [],
   currentSurvivorQuestion: null,
   resultReason: 'completed',
+  resultPersisted: false,
   leaderboard: [],
-  userStats: createDefaultStats()
+  userStats: createDefaultStats(),
+  // --- Learning track state ---
+  isTrackQuiz: false,
+  currentStageIndex: 0,
+  trackStep: 'lesson',
+  trackExerciseIndex: 0,
+  trackExerciseAnswered: false,
+  trackSelectedExercise: null,
+  trackStageCorrect: 0
 };
 
 // --- Auth Observers ---
@@ -129,13 +155,19 @@ function normalizeStats(data = {}) {
   const normalized = {
     ...defaults,
     ...data,
+    nickname: sanitizeNickname(data.nickname || defaults.nickname),
+    nicknameKey: data.nicknameKey || normalizeNicknameKey(data.nickname || defaults.nickname),
     level: Math.max(1, Number(data.level || defaults.level)),
     xp: Math.max(0, Number(data.xp || defaults.xp)),
     survivorBest: Math.max(0, Number(data.survivorBest || defaults.survivorBest)),
-    speedrunBestTime: data.speedrunBestTime !== undefined ? data.speedrunBestTime : defaults.speedrunBestTime,
+    speedrunBestTime: Math.max(0, Number(data.speedrunBestTime || defaults.speedrunBestTime)),
+    speedrunBestCorrect: Math.max(0, Number(data.speedrunBestCorrect || defaults.speedrunBestCorrect)),
+    speedrunAttempts: Math.max(0, Number(data.speedrunAttempts || defaults.speedrunAttempts)),
+    speedrunLastResult: data.speedrunLastResult || defaults.speedrunLastResult,
     totalCorrect: Math.max(0, Number(data.totalCorrect || defaults.totalCorrect)),
     quizzesCompleted: Math.max(0, Number(data.quizzesCompleted || defaults.quizzesCompleted)),
-    topicHistory: data.topicHistory || defaults.topicHistory
+    topicHistory: data.topicHistory || defaults.topicHistory,
+    trackProgress: data.trackProgress || defaults.trackProgress
   };
 
   normalized.rankingScore = calculateRankingScore(normalized);
@@ -157,7 +189,8 @@ function getUserProfilePayload() {
   return {
     ...state.userStats,
     displayName: state.user?.displayName || 'Aluno',
-    nickname: state.userStats.nickname || '',
+    nickname: sanitizeNickname(state.userStats.nickname || ''),
+    nicknameKey: normalizeNicknameKey(state.userStats.nickname || ''),
     photoURL: state.user?.photoURL || '',
     email: state.user?.email || '',
     rankingScore,
@@ -174,8 +207,6 @@ async function loadProgressFromFirestore(uid) {
       const data = doc.data();
       console.log("Dados carregados com sucesso:", data);
       state.userStats = normalizeStats(data);
-      // Garantir que o nickname seja carregado
-      state.userStats.nickname = data.nickname || '';
       return true;
     } else {
       console.log("Nenhum dado encontrado para este usuário. Iniciando novo perfil.");
@@ -184,19 +215,23 @@ async function loadProgressFromFirestore(uid) {
     }
   } catch (error) {
     console.error("Erro ao carregar do Firestore:", error);
+    // Se falhar a comunicação, mantemos o que temos mas avisamos que não foi carregado
     return false;
   }
 }
 
 async function saveProgressToFirestore() {
-  if (!state.user) return;
+  if (!state.user) return false;
 
   try {
     const payload = getUserProfilePayload();
     await db.collection('users').doc(state.user.uid).set(payload, { merge: true });
     console.log("Progresso salvo com sucesso.");
+    return true;
   } catch (error) {
     console.error("Erro ao salvar no Firestore:", error);
+    // Se falhar o save, o usuário continua jogando localmente
+    return false;
   }
 }
 
@@ -210,20 +245,118 @@ async function loadLeaderboardFromFirestore() {
       .limit(10)
       .get();
 
-    state.leaderboard = snapshot.docs.map((doc, index) => {
-      const data = doc.data();
-      return {
-        id: doc.id,
-        rank: index + 1,
-        ...normalizeStats(data),
-        displayName: data.displayName || 'Aluno',
-        nickname: data.nickname || '',
-        photoURL: data.photoURL || ''
-      };
-    });
+    state.leaderboard = snapshot.docs.map((doc, index) => ({
+      id: doc.id,
+      rank: index + 1,
+      ...normalizeStats(doc.data()),
+      displayName: doc.data().displayName || 'Aluno',
+      email: doc.data().email || '',
+      photoURL: doc.data().photoURL || ''
+    }));
   } catch (error) {
     console.warn("Nao foi possivel carregar o ranking:", error);
     state.leaderboard = [];
+  }
+}
+
+async function isNicknameAvailable(nicknameKey) {
+  const snapshot = await db
+    .collection('users')
+    .where('nicknameKey', '==', nicknameKey)
+    .limit(1)
+    .get();
+
+  return snapshot.empty || snapshot.docs.every(doc => doc.id === state.user.uid);
+}
+
+async function saveNickname(rawNickname) {
+  const validation = validateNickname(rawNickname);
+
+  if (!validation.isValid) {
+    return { ok: false, message: validation.message };
+  }
+
+  try {
+    const available = await isNicknameAvailable(validation.nicknameKey);
+
+    if (!available) {
+      return { ok: false, message: 'Este nickname ja esta em uso.' };
+    }
+
+    state.userStats.nickname = validation.nickname;
+    state.userStats.nicknameKey = validation.nicknameKey;
+
+    const saved = await saveProgressToFirestore();
+    if (!saved) {
+      return { ok: false, message: 'Nao foi possivel salvar agora. Tente novamente.' };
+    }
+
+    await loadLeaderboardFromFirestore();
+    return { ok: true };
+  } catch (error) {
+    console.error('Erro ao salvar nickname:', error);
+    return { ok: false, message: 'Nao foi possivel validar o nickname.' };
+  }
+}
+
+function getSpeedrunElapsedSeconds() {
+  if (!state.speedrunStartedAt) return state.speedrunTime;
+  return Math.floor((Date.now() - state.speedrunStartedAt) / 1000);
+}
+
+function createSpeedrunResult(totalQuestions) {
+  const errors = Math.max(0, totalQuestions - state.score);
+
+  return {
+    mode: SPEEDRUN_MODE,
+    timeSeconds: state.speedrunTime,
+    correct: state.score,
+    errors,
+    totalQuestions,
+    completedAt: new Date().toISOString()
+  };
+}
+
+function recordSpeedrunResult(totalQuestions) {
+  if (state.resultPersisted) return state.userStats.speedrunLastResult;
+
+  const result = createSpeedrunResult(totalQuestions);
+  const currentBestTime = Number(state.userStats.speedrunBestTime || 0);
+  const currentBestCorrect = Number(state.userStats.speedrunBestCorrect || 0);
+  const isBetterResult =
+    !currentBestTime ||
+    result.correct > currentBestCorrect ||
+    (result.correct === currentBestCorrect && result.timeSeconds < currentBestTime);
+
+  state.resultPersisted = true;
+  state.userStats.speedrunAttempts++;
+  state.userStats.speedrunLastResult = result;
+
+  if (isBetterResult) {
+    state.userStats.speedrunBestTime = result.timeSeconds;
+    state.userStats.speedrunBestCorrect = result.correct;
+  }
+
+  persistSpeedrunResult(result);
+  return result;
+}
+
+async function persistSpeedrunResult(result) {
+  if (!state.user) return;
+
+  await saveProgressToFirestore();
+
+  try {
+    await db.collection('gameResults').add({
+      ...result,
+      userId: state.user.uid,
+      nickname: getCurrentProfileName(),
+      displayName: state.user.displayName || '',
+      email: state.user.email || '',
+      createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  } catch (error) {
+    console.warn('Nao foi possivel registrar a tentativa de Speedrun:', error);
   }
 }
 
@@ -241,38 +374,6 @@ window.logout = () => {
   auth.signOut();
 };
 
-window.openNicknameModal = () => {
-  const modal = document.getElementById('nickname-modal');
-  const input = document.getElementById('nickname-input');
-  if (modal && input) {
-    input.value = state.userStats.nickname || '';
-    modal.style.display = 'flex';
-  }
-};
-
-window.closeNicknameModal = () => {
-  const modal = document.getElementById('nickname-modal');
-  if (modal) modal.style.display = 'none';
-};
-
-window.saveNickname = async (event) => {
-  event.preventDefault();
-  const input = document.getElementById('nickname-input');
-  const nickname = input.value.trim();
-  
-  if (!nickname) {
-    alert("Por favor, digite um nickname.");
-    return;
-  }
-
-  state.userStats.nickname = nickname;
-  await saveProgressToFirestore();
-  window.closeNicknameModal();
-  renderApp();
-  await loadLeaderboardFromFirestore();
-  if (state.currentView === 'home') renderHome();
-};
-
 // --- Utility ---
 function escapeHtml(value) {
   return String(value ?? '')
@@ -281,6 +382,18 @@ function escapeHtml(value) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#039;');
+}
+
+function getCurrentProfileName() {
+  return resolveProfileName({
+    nickname: state.userStats.nickname,
+    displayName: state.user?.displayName,
+    email: state.user?.email
+  });
+}
+
+function getAccountDisplayName() {
+  return state.user?.displayName || state.user?.email || 'Aluno';
 }
 
 function shuffleArray(items) {
@@ -355,6 +468,8 @@ function renderApp() {
   updateHeader();
   if (state.currentView === 'home') renderHome();
   else if (state.currentView === 'quiz') renderQuiz();
+  else if (state.currentView === 'track') renderTrackOverview();
+  else if (state.currentView === 'track-stage') renderTrackStage();
 }
 
 function renderLogin() {
@@ -387,19 +502,21 @@ function updateHeader() {
   document.querySelector('header p').style.display = 'block';
 
   const photoURL = state.user.photoURL || '';
-  const displayName = escapeHtml(state.user.displayName || 'Aluno');
-  const nickname = escapeHtml(state.userStats.nickname || displayName);
+  const profileName = escapeHtml(getCurrentProfileName());
+  const accountName = escapeHtml(getAccountDisplayName());
+  const profileHint = state.userStats.nickname ? accountName : 'Sem nickname';
   const xpPercent = Math.min(100, (state.userStats.xp / XP_PER_LEVEL) * 100);
 
   headerTop.innerHTML = `
     <div class="user-profile">
       ${photoURL ? `<img src="${escapeHtml(photoURL)}" class="user-avatar" alt="Profile">` : '<div class="user-avatar avatar-fallback">A</div>'}
-      <div style="text-align: left">
-        <div style="display: flex; align-items: center">
-          <div style="font-weight: 700; font-size: 0.9rem">${nickname}</div>
-          <button class="edit-nickname-btn" onclick="window.openNicknameModal()" title="Editar Nickname">✏️</button>
+      <div class="user-profile-copy">
+        <div class="profile-display-name">${profileName}</div>
+        <div class="profile-subtitle">${escapeHtml(profileHint)}</div>
+        <div class="profile-actions">
+          <button class="profile-action-btn" onclick="window.openNicknameModal()">Editar nick</button>
+          <button class="logout-btn" onclick="window.logout()">Sair</button>
         </div>
-        <button class="logout-btn" onclick="window.logout()">Sair</button>
       </div>
     </div>
 
@@ -451,19 +568,22 @@ function renderHome() {
         ${renderLeaderboard()}
       </div>
 
-      <div class="special-modes-grid" style="display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem;">
+      <div class="game-modes-grid">
         <div class="survivor-banner" onclick="window.startSurvivor()">
           <div class="survivor-content">
-            <h2>SOBREVIVENTE ⏳</h2>
-            <p>Acerte para ganhar tempo!</p>
-            <div class="best-score">RECORDE: ${state.userStats.survivorBest || 0}</div>
+            <h2>MODO SOBREVIVENTE ⏳</h2>
+            <p>O tempo não para! Acerte para ganhar segundos, até o teto de ${MAX_SURVIVOR_TIME}s.</p>
+            <div class="best-score">RECORDE PESSOAL: ${state.userStats.survivorBest || 0} PTS</div>
           </div>
         </div>
+
         <div class="speedrun-banner" onclick="window.startSpeedrun()">
           <div class="survivor-content">
-            <h2>SPEEDRUN ⚡</h2>
-            <p>3 perguntas por tópico. Seja rápido!</p>
-            <div class="best-score">MELHOR: ${state.userStats.speedrunBestTime ? formatTime(state.userStats.speedrunBestTime) : '--:--'}</div>
+            <h2>SPEEDRUN ⏱</h2>
+            <p>Responda 3 perguntas por tópico com cronômetro total e ordem aleatória.</p>
+            <div class="best-score speedrun-best">
+              MELHOR: ${state.userStats.speedrunBestTime ? `${state.userStats.speedrunBestCorrect} acertos em ${formatElapsedTime(state.userStats.speedrunBestTime)}` : '--'}
+            </div>
           </div>
         </div>
       </div>
@@ -476,16 +596,30 @@ function renderHome() {
       <div class="topic-grid">
         ${topics.map(topic => {
           const history = state.userStats.topicHistory[topic.id] || { stars: 0 };
+          const isTrack = topic.type === 'track';
+          const trackProgress = state.userStats.trackProgress?.[topic.id] || { completedStages: [] };
+          const totalStages = isTrack ? numeralsTrack.stages.length : 0;
+          const doneStages = isTrack ? (trackProgress.completedStages || []).length : 0;
+          const clickHandler = topic.locked
+            ? ''
+            : isTrack
+              ? `window.openTrack('${topic.id}')`
+              : `window.openDifficultyModal('${topic.id}')`;
           return `
-          <div class="topic-card ${topic.locked ? 'locked' : ''}"
+          <div class="topic-card ${topic.locked ? 'locked' : ''} ${isTrack ? 'track-card' : ''}"
                style="--card-color: ${topic.color}"
-               onclick="${topic.locked ? '' : `window.openDifficultyModal('${topic.id}')`}">
+               onclick="${clickHandler}">
+            ${isTrack ? '<div class="track-badge">TRILHA</div>' : ''}
             <div class="topic-icon">${topic.icon}</div>
-            <div class="topic-stars">
-              ${Array.from({ length: 3 }).map((_, i) => `
-                <span class="${i < history.stars ? 'star-filled' : 'star-empty'}">★</span>
-              `).join('')}
-            </div>
+            ${isTrack ? `
+              <div class="track-progress-mini">${doneStages}/${totalStages} etapas</div>
+            ` : `
+              <div class="topic-stars">
+                ${Array.from({ length: 3 }).map((_, i) => `
+                  <span class="${i < history.stars ? 'star-filled' : 'star-empty'}">★</span>
+                `).join('')}
+              </div>
+            `}
             <h3>${escapeHtml(topic.title)}</h3>
             <p>${escapeHtml(topic.description)}</p>
           </div>
@@ -510,21 +644,6 @@ function renderHome() {
         <button class="close-modal" onclick="window.closeDifficultyModal()">Cancelar</button>
       </div>
     </div>
-
-    <div id="nickname-modal" class="modal">
-      <div class="modal-content">
-        <h2>Seu Nickname</h2>
-        <p>Como você quer ser chamado no ranking?</p>
-        <form onsubmit="window.saveNickname(event)">
-          <div class="nickname-input-group">
-            <label for="nickname-input">Nickname</label>
-            <input type="text" id="nickname-input" class="nickname-field" maxlength="20" placeholder="Ex: MasterEnglish">
-          </div>
-          <button type="submit" class="next-btn">Salvar Nickname</button>
-        </form>
-        <button class="close-modal" onclick="window.closeNicknameModal()">Cancelar</button>
-      </div>
-    </div>
   `;
 }
 
@@ -547,17 +666,59 @@ function renderAnswerModePanel() {
   `;
 }
 
+function renderNicknameModal() {
+  return `
+    <div id="nickname-modal" class="modal" aria-hidden="true">
+      <div class="modal-content nickname-modal-content">
+        <h2>Seu nickname</h2>
+        <p class="modal-description">Este nome aparece no ranking e nas telas do jogo.</p>
+        <form class="nickname-form" onsubmit="window.submitNickname(event)">
+          <input
+            id="nickname-input"
+            class="nickname-input"
+            type="text"
+            autocomplete="off"
+            maxlength="20"
+            placeholder="Digite seu nickname"
+            aria-label="Nickname"
+          />
+          <div id="nickname-feedback" class="nickname-feedback" role="status"></div>
+          <button class="next-btn nickname-submit" type="submit">Salvar nickname</button>
+        </form>
+        <button class="close-modal" onclick="window.closeNicknameModal()">Cancelar</button>
+      </div>
+    </div>
+  `;
+}
+
+function ensureNicknameModal() {
+  let modal = document.getElementById('nickname-modal');
+
+  if (!modal) {
+    document.body.insertAdjacentHTML('beforeend', renderNicknameModal());
+    modal = document.getElementById('nickname-modal');
+  }
+
+  return modal;
+}
+
+function setNicknameFeedback(message, type = 'error') {
+  const feedback = document.getElementById('nickname-feedback');
+  if (!feedback) return;
+
+  feedback.textContent = message || '';
+  feedback.className = `nickname-feedback ${type}`;
+}
+
 function renderLeaderboard() {
   const rows = state.leaderboard.length
-    ? state.leaderboard.map(student => {
-        const nameToShow = escapeHtml(student.nickname || student.displayName || 'Aluno');
-        return `
+    ? state.leaderboard.map(student => `
         <div class="leaderboard-row ${student.id === state.user.uid ? 'current-student' : ''}">
           <span class="rank-position">#${student.rank}</span>
-          <span class="rank-name">${nameToShow}</span>
+          <span class="rank-name">${escapeHtml(resolveProfileName(student))}</span>
           <span class="rank-score">${student.rankingScore || 0} pts</span>
         </div>
-      `}).join('')
+      `).join('')
     : '<div class="leaderboard-empty">Ranking indisponível no momento.</div>';
 
   return `
@@ -580,25 +741,41 @@ function renderQuiz() {
   }
 
   const totalQuestions = state.isSurvivor ? 1 : state.questionQueue.length;
-  const progress = state.isSurvivor ? 100 : ((state.currentQuestionIndex + 1) / totalQuestions) * 100;
+  const progress = state.isSurvivor ? 100 : (state.currentQuestionIndex / totalQuestions) * 100;
+  const quizModeClass = state.isSurvivor ? 'survivor-mode' : state.isSpeedrun ? 'speedrun-mode' : '';
+  const difficulty = (state.isSpeedrun || state.isTrackQuiz) ? question.difficulty : state.currentDifficulty;
+  const scoreLabel = state.isSurvivor
+    ? `NÍVEL: ${state.survivorTier.toUpperCase()}`
+    : state.isSpeedrun
+      ? `ACERTOS: ${state.score}`
+      : `PONTOS: ${state.score}`;
   const mainContent = document.getElementById('main-content');
 
   mainContent.innerHTML = `
-    <div class="quiz-container ${state.isSurvivor ? 'survivor-mode' : ''} ${state.isSpeedrun ? 'speedrun-mode' : ''}">
+    <div class="quiz-container ${quizModeClass}">
       <div id="streak-badge" class="streak-badge" style="display: ${state.streak >= 2 ? 'block' : 'none'}">
         🔥 COMBO X${state.streak}
       </div>
 
-      ${state.isSurvivor || state.isSpeedrun ? `
+      ${state.isSurvivor ? `
         <div class="survivor-header-stats">
-          <div class="timer-display ${!state.isSpeedrun && state.timeLeft < 10 ? 'low-time' : ''} ${state.isSpeedrun ? 'speedrun-timer' : `tier-${state.survivorTier}`}">
-            <span class="timer-icon">${state.isSpeedrun ? '⚡' : '⏳'}</span> <span id="timer-seconds">${state.isSpeedrun ? formatTime(state.speedrunTime) : state.timeLeft + 's'}</span>
+          <div class="timer-display ${state.timeLeft < 10 ? 'low-time' : ''} tier-${state.survivorTier}">
+            <span class="timer-icon">⏳</span> <span id="timer-seconds">${state.timeLeft}s</span>
           </div>
-          ${state.isSurvivor ? `
-            <div class="shield-display ${state.shields > 0 ? 'has-shields' : ''}">
-              🛡️ ${state.shields}/${MAX_SHIELDS}
-            </div>
-          ` : ''}
+          <div class="shield-display ${state.shields > 0 ? 'has-shields' : ''}">
+            🛡️ ${state.shields}/${MAX_SHIELDS}
+          </div>
+        </div>
+      ` : ''}
+
+      ${state.isSpeedrun ? `
+        <div class="speedrun-header-stats">
+          <div class="timer-display speedrun-timer">
+            <span class="timer-icon">⏱</span> <span id="timer-seconds">${formatElapsedTime(state.speedrunTime)}</span>
+          </div>
+          <div class="speedrun-progress">
+            ${state.currentQuestionIndex + 1}/${totalQuestions}
+          </div>
         </div>
       ` : ''}
 
@@ -608,14 +785,14 @@ function renderQuiz() {
           <div class="progress-bar-fill" style="width: ${progress}%"></div>
         </div>
         <div class="score-display">
-          ${state.isSurvivor ? `NÍVEL: ${state.survivorTier.toUpperCase()}` : (state.isSpeedrun ? `${state.currentQuestionIndex + 1}/${totalQuestions}` : `PONTOS: ${state.score}`)}
+          ${scoreLabel}
         </div>
       </div>
 
       ${state.isSurvivor ? `<div class="survivor-score-overlay">${state.score}</div>` : ''}
 
       <div class="question-box">
-        <div class="difficulty-tag ${state.isSpeedrun ? 'ouro' : state.currentDifficulty}">${state.isSpeedrun ? 'SPEEDRUN' : state.currentDifficulty.toUpperCase()}</div>
+        <div class="difficulty-tag ${difficulty}">${difficulty.toUpperCase()}</div>
         <p class="question-text">${escapeHtml(question.question)}</p>
         ${state.answerMode === 'written' ? renderWrittenAnswerForm() : renderMultipleChoiceOptions(question)}
       </div>
@@ -670,10 +847,20 @@ function renderEmptyQuiz() {
 }
 
 function renderResults() {
+  if (state.isTrackQuiz) {
+    renderTrackQuizResults();
+    return;
+  }
+
+  if (state.isSpeedrun) {
+    state.speedrunTime = getSpeedrunElapsedSeconds();
+  }
+
   stopTimer();
 
   const totalQuestions = state.isSurvivor ? Math.max(1, state.score) : state.questionQueue.length;
   const percentage = state.isSurvivor ? 0 : Math.round((state.score / totalQuestions) * 100);
+  const speedrunResult = state.isSpeedrun ? recordSpeedrunResult(totalQuestions) : null;
 
   let stars = 0;
   if (!state.isSurvivor && !state.isSpeedrun) {
@@ -687,16 +874,9 @@ function renderResults() {
     }
     state.userStats.quizzesCompleted++;
     saveProgressToFirestore();
-  } else if (state.isSurvivor && state.score > (state.userStats.survivorBest || 0)) {
+  } else if (state.score > (state.userStats.survivorBest || 0)) {
     state.userStats.survivorBest = state.score;
     saveProgressToFirestore();
-  } else if (state.isSpeedrun) {
-    if (state.score === totalQuestions) { // Só salva recorde se acertar tudo
-      if (!state.userStats.speedrunBestTime || state.speedrunTime < state.userStats.speedrunBestTime) {
-        state.userStats.speedrunBestTime = state.speedrunTime;
-        saveProgressToFirestore();
-      }
-    }
   }
 
   const mainContent = document.getElementById('main-content');
@@ -704,23 +884,25 @@ function renderResults() {
     <div class="quiz-container result-screen ${state.isSurvivor ? 'survivor-results' : ''} ${state.isSpeedrun ? 'speedrun-results' : ''}">
       <h2>${getResultTitle()}</h2>
 
-      ${!state.isSurvivor && !state.isSpeedrun ? `
+      ${state.isSpeedrun ? `
+        <div class="speedrun-score-big">${formatElapsedTime(speedrunResult.timeSeconds)}</div>
+        <p>Tempo total</p>
+      ` : !state.isSurvivor ? `
         <div class="topic-stars" style="justify-content: center; font-size: 3rem; margin: 1rem 0">
           ${Array.from({ length: 3 }).map((_, i) => `
             <span class="${i < stars ? 'star-filled' : 'star-empty'}">★</span>
           `).join('')}
         </div>
         <div class="score-circle">${percentage}%</div>
-      ` : (state.isSpeedrun ? `
-        <div class="time-big">${formatTime(state.speedrunTime)}</div>
-        <p>Tempo Total</p>
       ` : `
         <div class="survivor-score-big">${state.score}</div>
         <p>Questões respondidas</p>
-      `)}
+      `}
 
       <p style="font-size: 1.2rem; margin-bottom: 2rem">
-        ${state.isSurvivor
+        ${state.isSpeedrun
+          ? `Você acertou <strong>${speedrunResult.correct}</strong> e errou <strong>${speedrunResult.errors}</strong> de <strong>${speedrunResult.totalQuestions}</strong> perguntas.`
+          : state.isSurvivor
           ? `Você terminou com <strong>${state.score}</strong> ponto(s).`
           : `Você acertou <strong>${state.score}</strong> de <strong>${totalQuestions}</strong> perguntas.`}
       </p>
@@ -729,13 +911,13 @@ function renderResults() {
     </div>
   `;
 
-  if (stars === 3 || (state.isSurvivor && state.score > 20) || (state.isSpeedrun && state.score === totalQuestions)) {
+  if (stars === 3 || (state.isSurvivor && state.score > 20) || (state.isSpeedrun && speedrunResult.correct === speedrunResult.totalQuestions)) {
     launchConfetti({ particleCount: 200, spread: 100, origin: { y: 0.6 } });
   }
 }
 
 function getResultTitle() {
-  if (state.isSpeedrun) return 'Speedrun Concluído!';
+  if (state.isSpeedrun) return 'Speedrun Finalizado!';
   if (!state.isSurvivor) return 'Quiz Finalizado!';
   if (state.resultReason === 'wrong') return 'Você errou!';
   if (state.resultReason === 'time') return 'Tempo Esgotado!';
@@ -767,6 +949,13 @@ function getCurrentQuestion() {
 
 function buildQuestionQueue(topicId, difficulty) {
   return shuffleArray(getTopicData(topicId, difficulty)).map(withShuffledOptions);
+}
+
+function buildSpeedrunQueue() {
+  return buildSpeedrunQuestionQueue({
+    topics,
+    topicQuestionMap
+  });
 }
 
 function getRandomQuestion(tier) {
@@ -801,6 +990,53 @@ window.closeDifficultyModal = () => {
   if (modal) modal.style.display = 'none';
 };
 
+window.openNicknameModal = () => {
+  const modal = ensureNicknameModal();
+  const input = document.getElementById('nickname-input');
+
+  if (input) {
+    input.value = state.userStats.nickname || '';
+    setNicknameFeedback('');
+    requestAnimationFrame(() => input.focus());
+  }
+
+  modal.style.display = 'flex';
+  modal.setAttribute('aria-hidden', 'false');
+};
+
+window.closeNicknameModal = () => {
+  const modal = document.getElementById('nickname-modal');
+  if (!modal) return;
+
+  modal.style.display = 'none';
+  modal.setAttribute('aria-hidden', 'true');
+};
+
+window.submitNickname = async (event) => {
+  event.preventDefault();
+  const input = document.getElementById('nickname-input');
+  const submitButton = document.querySelector('.nickname-submit');
+  if (!input) return;
+
+  submitButton?.setAttribute('disabled', 'true');
+  setNicknameFeedback('Salvando...', 'info');
+
+  const result = await saveNickname(input.value);
+
+  submitButton?.removeAttribute('disabled');
+
+  if (!result.ok) {
+    setNicknameFeedback(result.message);
+    input.focus();
+    return;
+  }
+
+  setNicknameFeedback('Nickname salvo.', 'success');
+  window.closeNicknameModal();
+  updateHeader();
+  if (state.currentView === 'home') renderHome();
+};
+
 window.setAnswerMode = (mode) => {
   state.answerMode = mode === 'written' ? 'written' : 'multiple';
   renderHome();
@@ -828,7 +1064,11 @@ window.startQuiz = (topicId, difficulty) => {
   state.isAnswered = false;
   state.selectedAnswer = null;
   state.isSurvivor = false;
+  state.isSpeedrun = false;
+  state.speedrunTime = 0;
+  state.speedrunStartedAt = 0;
   state.resultReason = 'completed';
+  state.resultPersisted = false;
   window.closeDifficultyModal();
   renderApp();
 };
@@ -848,6 +1088,9 @@ window.startSurvivor = () => {
   state.survivorAskedIds = [];
   state.lastQuestionId = null;
   state.resultReason = 'time';
+  state.resultPersisted = false;
+  state.speedrunTime = 0;
+  state.speedrunStartedAt = 0;
   state.currentSurvivorQuestion = getRandomQuestion('bronze');
   state.lastQuestionStartTime = Date.now();
 
@@ -856,59 +1099,59 @@ window.startSurvivor = () => {
 };
 
 window.startSpeedrun = () => {
-  state.isSurvivor = false;
-  state.isSpeedrun = true;
-  state.currentView = 'quiz';
-  state.score = 0;
-  state.streak = 0;
-  state.speedrunTime = 0;
-  state.currentQuestionIndex = 0;
-  state.isAnswered = false;
-  state.selectedAnswer = null;
-  state.resultReason = 'completed';
+  const speedrunQueue = buildSpeedrunQueue();
 
-  // Selecionar até 3 perguntas aleatórias por tópico
-  const speedrunQuestions = [];
-  topics.forEach(topic => {
-    const topicPool = allQuestionData.filter(q => q.topicId === topic.id);
-    const shuffledPool = shuffleArray(topicPool);
-    const selected = shuffledPool.slice(0, 3);
-    speedrunQuestions.push(...selected);
-  });
+  if (!speedrunQueue.ok) {
+    const topicsWithoutEnoughQuestions = speedrunQueue.missingTopics
+      .map(topic => `${topic.title} (${topic.available}/${topic.required})`)
+      .join(', ');
 
-  state.questionQueue = shuffleArray(speedrunQuestions).map(withShuffledOptions);
-
-  if (!state.questionQueue.length) {
-    alert("Nenhuma pergunta disponível para o modo Speedrun.");
+    alert(`Nao foi possivel iniciar o Speedrun. Topicos com perguntas insuficientes: ${topicsWithoutEnoughQuestions}.`);
     return;
   }
 
-  startTimer();
+  state.currentTopic = SPEEDRUN_MODE;
+  state.currentDifficulty = speedrunQueue.questions[0]?.difficulty || 'bronze';
+  state.currentView = 'quiz';
+  state.currentQuestionIndex = 0;
+  state.questionQueue = speedrunQueue.questions;
+  state.score = 0;
+  state.streak = 0;
+  state.shields = 0;
+  state.isAnswered = false;
+  state.selectedAnswer = null;
+  state.isSurvivor = false;
+  state.isSpeedrun = true;
+  state.speedrunTime = 0;
+  state.speedrunStartedAt = Date.now();
+  state.currentSurvivorQuestion = null;
+  state.resultReason = 'completed';
+  state.resultPersisted = false;
+
+  startSpeedrunTimer();
   renderApp();
 };
 
 function startTimer() {
   stopTimer();
   state.timerId = setInterval(() => {
-    if (state.isSpeedrun) {
-      state.speedrunTime++;
-      updateTimerDisplay();
-    } else {
-      state.timeLeft--;
-      updateTimerDisplay();
+    state.timeLeft--;
+    updateTimerDisplay();
 
-      if (state.timeLeft <= 0) {
-        state.resultReason = 'time';
-        renderResults();
-      }
+    if (state.timeLeft <= 0) {
+      state.resultReason = 'time';
+      renderResults();
     }
   }, 1000);
 }
 
-function formatTime(seconds) {
-  const m = Math.floor(seconds / 60);
-  const s = seconds % 60;
-  return `${m}:${s.toString().padStart(2, '0')}`;
+function startSpeedrunTimer() {
+  stopTimer();
+  state.speedrunStartedAt = Date.now();
+  state.timerId = setInterval(() => {
+    state.speedrunTime = getSpeedrunElapsedSeconds();
+    updateTimerDisplay();
+  }, 250);
 }
 
 function updateTimerDisplay() {
@@ -916,11 +1159,12 @@ function updateTimerDisplay() {
   if (!timerEl) return;
 
   if (state.isSpeedrun) {
-    timerEl.innerText = formatTime(state.speedrunTime);
-  } else {
-    timerEl.innerText = state.timeLeft + 's';
-    if (state.timeLeft < 10) timerEl.parentElement.classList.add('low-time');
+    timerEl.innerText = formatElapsedTime(state.speedrunTime);
+    return;
   }
+
+  timerEl.innerText = state.timeLeft + 's';
+  if (state.timeLeft < 10) timerEl.parentElement.classList.add('low-time');
 }
 
 window.goHome = async () => {
@@ -928,6 +1172,8 @@ window.goHome = async () => {
   state.currentView = 'home';
   state.isSurvivor = false;
   state.isSpeedrun = false;
+  state.isTrackQuiz = false;
+  state.speedrunStartedAt = 0;
   await loadLeaderboardFromFirestore();
   renderApp();
 };
@@ -974,13 +1220,14 @@ function handleCorrectAnswer() {
   state.streak++;
   state.userStats.totalCorrect++;
 
-  if (state.streak > 0 && state.streak % SHIELD_EVERY_STREAK === 0) {
+  if (state.isSurvivor && state.streak > 0 && state.streak % SHIELD_EVERY_STREAK === 0) {
     state.shields = Math.min(MAX_SHIELDS, state.shields + 1);
   }
 
+  const activeDifficulty = (state.isSpeedrun || state.isTrackQuiz) ? getCurrentQuestion()?.difficulty : state.currentDifficulty;
   let xpGain = XP_CORRECT;
-  if (state.currentDifficulty === 'prata') xpGain *= 1.5;
-  if (state.currentDifficulty === 'ouro') xpGain *= 2;
+  if (activeDifficulty === 'prata') xpGain *= 1.5;
+  if (activeDifficulty === 'ouro') xpGain *= 2;
 
   if (state.isSurvivor) {
     xpGain *= 0.5;
@@ -1032,12 +1279,354 @@ function goToNextQuestion() {
 
   if (state.currentQuestionIndex < state.questionQueue.length - 1) {
     state.currentQuestionIndex++;
+    if (state.isSpeedrun || state.isTrackQuiz) {
+      state.currentDifficulty = state.questionQueue[state.currentQuestionIndex]?.difficulty || state.currentDifficulty;
+    }
     renderQuiz();
   } else {
     state.resultReason = 'completed';
     renderResults();
   }
 }
+
+// =============================================================
+//  Learning Track (Trilha) — aulas guiadas, vocabulário,
+//  exercícios interativos, progressão por etapas e quiz final.
+// =============================================================
+function getTrackProgress() {
+  if (!state.userStats.trackProgress) state.userStats.trackProgress = {};
+  if (!state.userStats.trackProgress[numeralsTrack.id]) {
+    state.userStats.trackProgress[numeralsTrack.id] = { completedStages: [], finalQuizBest: 0 };
+  }
+  const progress = state.userStats.trackProgress[numeralsTrack.id];
+  if (!Array.isArray(progress.completedStages)) progress.completedStages = [];
+  return progress;
+}
+
+function isStageCompleted(stageId) {
+  return getTrackProgress().completedStages.includes(stageId);
+}
+
+function isStageUnlocked(index) {
+  if (index === 0) return true;
+  return isStageCompleted(numeralsTrack.stages[index - 1].id);
+}
+
+function allStagesCompleted() {
+  return numeralsTrack.stages.every(stage => isStageCompleted(stage.id));
+}
+
+window.openTrack = (topicId) => {
+  stopTimer();
+  state.isTrackQuiz = false;
+  state.isSurvivor = false;
+  state.isSpeedrun = false;
+  state.currentView = 'track';
+  state.currentTopic = topicId || numeralsTrack.id;
+  renderApp();
+};
+
+function renderTrackOverview() {
+  state.currentView = 'track';
+  const progress = getTrackProgress();
+  const done = progress.completedStages.length;
+  const total = numeralsTrack.stages.length;
+  const percent = Math.round((done / total) * 100);
+  const finalUnlocked = allStagesCompleted();
+  const mainContent = document.getElementById('main-content');
+
+  mainContent.innerHTML = `
+    <div class="track-container">
+      <div class="track-hero">
+        <button class="back-btn" onclick="window.goHome()">← Início</button>
+        <div class="track-hero-icon">${numeralsTrack.icon}</div>
+        <h2>${escapeHtml(numeralsTrack.title)}</h2>
+        <p class="track-intro">${escapeHtml(numeralsTrack.intro)}</p>
+        <div class="track-overall-progress">
+          <div class="track-progress-bar"><div class="track-progress-fill" style="width:${percent}%"></div></div>
+          <span>${done}/${total} etapas concluídas</span>
+        </div>
+      </div>
+
+      <div class="track-stage-list">
+        ${numeralsTrack.stages.map((stage, index) => {
+          const completed = isStageCompleted(stage.id);
+          const unlocked = isStageUnlocked(index);
+          return `
+            <div class="track-stage-item ${completed ? 'completed' : ''} ${!unlocked ? 'locked' : ''}"
+                 onclick="${unlocked ? `window.openStage(${index})` : ''}">
+              <div class="stage-number">${completed ? '✓' : unlocked ? index + 1 : '🔒'}</div>
+              <div class="stage-info">
+                <h3>${stage.icon} ${escapeHtml(stage.title)}</h3>
+                <p>${escapeHtml(stage.subtitle)}</p>
+              </div>
+              <div class="stage-status">${completed ? 'Concluída' : unlocked ? 'Começar' : 'Bloqueada'}</div>
+            </div>
+          `;
+        }).join('')}
+
+        <div class="track-stage-item final-quiz ${finalUnlocked ? '' : 'locked'}"
+             onclick="${finalUnlocked ? 'window.startTrackFinalQuiz()' : ''}">
+          <div class="stage-number">${finalUnlocked ? '🏁' : '🔒'}</div>
+          <div class="stage-info">
+            <h3>🎓 Quiz Final da Trilha</h3>
+            <p>${progress.finalQuizBest ? `Revisão geral. Melhor resultado: ${progress.finalQuizBest}%` : 'Conclua todas as etapas para liberar a revisão geral.'}</p>
+          </div>
+          <div class="stage-status">${finalUnlocked ? 'Fazer quiz' : 'Bloqueado'}</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+window.openStage = (index) => {
+  state.currentStageIndex = index;
+  state.trackStep = 'lesson';
+  state.trackExerciseIndex = 0;
+  state.trackExerciseAnswered = false;
+  state.trackSelectedExercise = null;
+  state.trackStageCorrect = 0;
+  state.currentView = 'track-stage';
+  renderApp();
+};
+
+window.trackGoToStep = (step) => {
+  state.trackStep = step;
+  if (step === 'exercises') {
+    state.trackExerciseIndex = 0;
+    state.trackExerciseAnswered = false;
+    state.trackSelectedExercise = null;
+    state.trackStageCorrect = 0;
+  }
+  renderApp();
+};
+
+function renderTrackStage() {
+  state.currentView = 'track-stage';
+  const stage = numeralsTrack.stages[state.currentStageIndex];
+  if (!stage) {
+    window.openTrack(numeralsTrack.id);
+    return;
+  }
+
+  if (state.trackStep === 'lesson') renderStageLesson(stage);
+  else if (state.trackStep === 'vocabulary') renderStageVocabulary(stage);
+  else renderStageExercises(stage);
+}
+
+function stageStepHeader(stage, stepLabel) {
+  return `
+    <div class="track-stage-header">
+      <button class="back-btn" onclick="window.openTrack('${numeralsTrack.id}')">← Trilha</button>
+      <div class="stage-title-wrap">
+        <span class="stage-chip">${stage.icon} ${escapeHtml(stage.title)}</span>
+        <span class="stage-step-label">${escapeHtml(stepLabel)}</span>
+      </div>
+    </div>
+    <div class="track-steps-indicator">
+      <span class="${state.trackStep === 'lesson' ? 'active' : ''}">1. Aula</span>
+      <span class="${state.trackStep === 'vocabulary' ? 'active' : ''}">2. Vocabulário</span>
+      <span class="${state.trackStep === 'exercises' ? 'active' : ''}">3. Exercícios</span>
+    </div>
+  `;
+}
+
+function renderStageLesson(stage) {
+  const mainContent = document.getElementById('main-content');
+  mainContent.innerHTML = `
+    <div class="track-container stage-view">
+      ${stageStepHeader(stage, 'Aula')}
+      <div class="lesson-card">
+        <p class="lesson-intro">${escapeHtml(stage.lesson.intro)}</p>
+        <ul class="lesson-points">
+          ${stage.lesson.points.map(p => `<li>${escapeHtml(p)}</li>`).join('')}
+        </ul>
+        <h4 class="lesson-subhead">📌 Exemplos práticos de TI</h4>
+        <div class="lesson-examples">
+          ${stage.lesson.examples.map(ex => `
+            <div class="example-row">
+              <span class="example-en">🇺🇸 ${escapeHtml(ex.en)}</span>
+              <span class="example-pt">🇧🇷 ${escapeHtml(ex.pt)}</span>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      <div class="track-nav">
+        <button class="next-btn" onclick="window.trackGoToStep('vocabulary')">Ver vocabulário →</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderStageVocabulary(stage) {
+  const mainContent = document.getElementById('main-content');
+  mainContent.innerHTML = `
+    <div class="track-container stage-view">
+      ${stageStepHeader(stage, 'Vocabulário técnico bilíngue')}
+      <div class="vocab-grid">
+        ${stage.vocabulary.map(v => `
+          <div class="vocab-card">
+            <div class="vocab-top">
+              <span class="vocab-en">${escapeHtml(v.en)}</span>
+              <span class="vocab-pt">${escapeHtml(v.pt)}</span>
+            </div>
+            <div class="vocab-example">"${escapeHtml(v.example)}"</div>
+          </div>
+        `).join('')}
+      </div>
+      <div class="track-nav">
+        <button class="back-btn-secondary" onclick="window.trackGoToStep('lesson')">← Aula</button>
+        <button class="next-btn" onclick="window.trackGoToStep('exercises')">Fazer exercícios →</button>
+      </div>
+    </div>
+  `;
+}
+
+function renderStageExercises(stage) {
+  const mainContent = document.getElementById('main-content');
+  const exercises = stage.exercises;
+  const ex = exercises[state.trackExerciseIndex];
+  const total = exercises.length;
+  const answeredCorrectly = state.trackExerciseAnswered && ex.options[state.trackSelectedExercise] === ex.answer;
+
+  mainContent.innerHTML = `
+    <div class="track-container stage-view">
+      ${stageStepHeader(stage, `Exercício ${state.trackExerciseIndex + 1} de ${total}`)}
+      <div class="exercise-card">
+        <div class="progress-bar-wrap">
+          <div class="progress-bar-fill" style="width:${(state.trackExerciseIndex / total) * 100}%"></div>
+        </div>
+        <p class="exercise-question">${escapeHtml(ex.question)}</p>
+        <div class="options-grid">
+          ${ex.options.map((opt, i) => {
+            let cls = 'option-btn';
+            if (state.trackExerciseAnswered) {
+              if (opt === ex.answer) cls += ' correct';
+              else if (i === state.trackSelectedExercise) cls += ' incorrect';
+            }
+            return `<button class="${cls}" onclick="window.answerTrackExercise(${i})" ${state.trackExerciseAnswered ? 'disabled' : ''}>${escapeHtml(opt)}</button>`;
+          }).join('')}
+        </div>
+        ${state.trackExerciseAnswered ? `
+          <div class="exercise-feedback ${answeredCorrectly ? 'ok' : 'bad'}">
+            <strong>${answeredCorrectly ? '✓ Correto!' : '✗ Quase lá!'}</strong>
+            <span>${escapeHtml(ex.explanation)}</span>
+          </div>
+          <div class="track-nav">
+            <button class="next-btn" onclick="window.trackNextExercise()">
+              ${state.trackExerciseIndex < total - 1 ? 'Próximo exercício →' : 'Concluir etapa ✓'}
+            </button>
+          </div>
+        ` : ''}
+      </div>
+    </div>
+  `;
+}
+
+window.answerTrackExercise = (index) => {
+  if (state.trackExerciseAnswered) return;
+  const stage = numeralsTrack.stages[state.currentStageIndex];
+  const ex = stage.exercises[state.trackExerciseIndex];
+  state.trackExerciseAnswered = true;
+  state.trackSelectedExercise = index;
+
+  if (ex.options[index] === ex.answer) {
+    state.trackStageCorrect++;
+    addXP(10);
+    launchConfetti({ particleCount: 25, spread: 50, origin: { y: 0.8 }, colors: ['#43e97b', '#ffffff'] });
+  }
+
+  renderApp();
+};
+
+window.trackNextExercise = () => {
+  const stage = numeralsTrack.stages[state.currentStageIndex];
+  if (state.trackExerciseIndex < stage.exercises.length - 1) {
+    state.trackExerciseIndex++;
+    state.trackExerciseAnswered = false;
+    state.trackSelectedExercise = null;
+    renderApp();
+    return;
+  }
+  completeStage(stage);
+};
+
+function completeStage(stage) {
+  const progress = getTrackProgress();
+  if (!progress.completedStages.includes(stage.id)) {
+    progress.completedStages.push(stage.id);
+    addXP(30);
+  }
+  saveProgressToFirestore();
+  launchConfetti({ particleCount: 120, spread: 80, origin: { y: 0.6 }, colors: ['#43e97b', '#38f9d7', '#ffffff'] });
+  window.openTrack(numeralsTrack.id);
+}
+
+window.startTrackFinalQuiz = () => {
+  const queue = (numeralsTrack.finalQuiz || []).map(withShuffledOptions);
+  if (!queue.length) return;
+
+  state.currentTopic = numeralsTrack.id;
+  state.currentDifficulty = queue[0]?.difficulty || 'bronze';
+  state.currentView = 'quiz';
+  state.currentQuestionIndex = 0;
+  state.questionQueue = queue;
+  state.score = 0;
+  state.streak = 0;
+  state.isAnswered = false;
+  state.selectedAnswer = null;
+  state.isSurvivor = false;
+  state.isSpeedrun = false;
+  state.isTrackQuiz = true;
+  state.speedrunTime = 0;
+  state.speedrunStartedAt = 0;
+  state.resultReason = 'completed';
+  state.resultPersisted = false;
+  renderApp();
+};
+
+function renderTrackQuizResults() {
+  stopTimer();
+  const total = state.questionQueue.length;
+  const percentage = total ? Math.round((state.score / total) * 100) : 0;
+  const progress = getTrackProgress();
+
+  if (percentage > (progress.finalQuizBest || 0)) {
+    progress.finalQuizBest = percentage;
+  }
+  state.userStats.quizzesCompleted++;
+  saveProgressToFirestore();
+
+  let stars = 0;
+  if (percentage >= 100) stars = 3;
+  else if (percentage >= 70) stars = 2;
+  else if (percentage >= 40) stars = 1;
+
+  const mainContent = document.getElementById('main-content');
+  mainContent.innerHTML = `
+    <div class="quiz-container result-screen">
+      <h2>Quiz da Trilha Finalizado!</h2>
+      <div class="topic-stars" style="justify-content:center;font-size:3rem;margin:1rem 0">
+        ${Array.from({ length: 3 }).map((_, i) => `<span class="${i < stars ? 'star-filled' : 'star-empty'}">★</span>`).join('')}
+      </div>
+      <div class="score-circle">${percentage}%</div>
+      <p style="font-size:1.2rem;margin-bottom:2rem">Você acertou <strong>${state.score}</strong> de <strong>${total}</strong> perguntas.</p>
+      <div class="track-nav" style="justify-content:center">
+        <button class="next-btn" onclick="window.backToTrackFromQuiz()">Voltar à trilha</button>
+        <button class="back-btn-secondary" onclick="window.goHome()">Início</button>
+      </div>
+    </div>
+  `;
+
+  if (stars === 3) {
+    launchConfetti({ particleCount: 200, spread: 100, origin: { y: 0.6 } });
+  }
+}
+
+window.backToTrackFromQuiz = () => {
+  state.isTrackQuiz = false;
+  window.openTrack(numeralsTrack.id);
+};
 
 // Initialize
 renderApp();

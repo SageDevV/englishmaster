@@ -40,5 +40,13 @@ export const topics = [
     description: 'Comunicação, fóruns e etiqueta na rede.',
     icon: '📶',
     color: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
+  },
+  {
+    id: 'numerals-units',
+    title: 'Numerals, Quantities & Units in IT',
+    description: 'Trilha guiada: números, quantidades e unidades de medida em TI.',
+    icon: '🔢',
+    color: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)',
+    type: 'track'
   }
 ];
