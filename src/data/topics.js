@@ -47,5 +47,12 @@ export const topics = [
     description: 'Números, quantidades e unidades de medida em TI.',
     icon: '🔢',
     color: 'linear-gradient(135deg, #43e97b 0%, #38f9d7 100%)'
+  },
+  {
+    id: 'web-navigation',
+    title: 'Navegação na Web em Inglês',
+    description: 'Navegadores, links, abas e termos de navegação na web.',
+    icon: '🧭',
+    color: 'linear-gradient(135deg, #30cfd0 0%, #330867 100%)'
   }
 ];

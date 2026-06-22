@@ -7,6 +7,7 @@ import { instructionsData } from './src/data/instructions.js';
 import { techLifeData } from './src/data/techLife.js';
 import { connectivityData } from './src/data/connectivity.js';
 import { numeralsData } from './src/data/numerals.js';
+import { webNavigationData } from './src/data/webNavigation.js';
 import {
   buildSpeedrunQuestionQueue,
   formatElapsedTime,
@@ -51,7 +52,8 @@ const topicQuestionMap = {
   'instructions': instructionsData,
   'tech-life': techLifeData,
   'connectivity': connectivityData,
-  'numerals-units': numeralsData
+  'numerals-units': numeralsData,
+  'web-navigation': webNavigationData
 };
 
 const allQuestionData = Object.entries(topicQuestionMap).flatMap(([topicId, questions]) =>
