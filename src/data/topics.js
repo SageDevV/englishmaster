@@ -54,5 +54,12 @@ export const topics = [
     description: 'Navegadores, links, abas e termos de navegação na web.',
     icon: '🧭',
     color: 'linear-gradient(135deg, #30cfd0 0%, #330867 100%)'
+  },
+  {
+    id: 'software-interfaces',
+    title: 'Interfaces de Softwares e Aplicativos',
+    description: 'Menus, botões, opções de configuração e personalização de software.',
+    icon: '🖱️',
+    color: 'linear-gradient(135deg, #ff9a9e 0%, #6a11cb 100%)'
   }
 ];
