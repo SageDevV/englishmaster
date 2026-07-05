@@ -61,5 +61,12 @@ export const topics = [
     description: 'Menus, botões, opções de configuração e personalização de software.',
     icon: '🖱️',
     color: 'linear-gradient(135deg, #ff9a9e 0%, #6a11cb 100%)'
+  },
+  {
+    id: 'collaborative-tools',
+    title: 'Ferramentas Colaborativas Online',
+    description: 'Vocabulário de Google Drive, GitHub, Slack e colaboração em inglês.',
+    icon: '👥',
+    color: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)'
   }
 ];
