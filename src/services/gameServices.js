@@ -13,6 +13,8 @@ export function shuffleItems(items, random = Math.random) {
 
 export function sanitizeNickname(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ');
+
+
 }
 
 export function normalizeNicknameKey(value) {
