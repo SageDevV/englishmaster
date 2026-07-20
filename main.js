@@ -10,6 +10,7 @@ import { numeralsData } from './src/data/numerals.js';
 import { webNavigationData } from './src/data/webNavigation.js';
 import { softwareInterfacesData } from './src/data/softwareInterfaces.js';
 import { collaborativeToolsData } from './src/data/collaborativeTools.js';
+import { manualReadingData } from './src/data/manualReading.js';
 import {
   buildSpeedrunQuestionQueue,
   formatElapsedTime,
@@ -57,7 +58,8 @@ const topicQuestionMap = {
   'numerals-units': numeralsData,
   'web-navigation': webNavigationData,
   'software-interfaces': softwareInterfacesData,
-  'collaborative-tools': collaborativeToolsData
+  'collaborative-tools': collaborativeToolsData,
+  'manual-reading': manualReadingData
 };
 
 const allQuestionData = Object.entries(topicQuestionMap).flatMap(([topicId, questions]) =>

@@ -68,5 +68,12 @@ export const topics = [
     description: 'Vocabulário de Google Drive, GitHub, Slack e colaboração em inglês.',
     icon: '👥',
     color: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)'
+  },
+  {
+    id: 'manual-reading',
+    title: 'Leitura de Manuais e Instruções',
+    description: 'Identifique e compreenda seções de manuais técnicos e artigos.',
+    icon: '📖',
+    color: 'linear-gradient(135deg, #c79081 0%, #dfa579 100%)'
   }
 ];
