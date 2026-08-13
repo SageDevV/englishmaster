@@ -75,11 +75,27 @@ function serializeExamDocument(doc) {
     questionCount: data.questionCount,
     questions: data.questions || [],
     gradingSalt: data.gradingSalt,
-    createdAtMillis: timestampToMillis(data.createdAt)
+    active: data.active === true,
+    deleted: data.deleted === true,
+    createdAtMillis: timestampToMillis(data.createdAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt)
   };
 }
 
-async function serializeAttemptData(data, exam) {
+function getAttemptExam(data, fallbackExam) {
+  if (!data.examSnapshot?.questions || !data.examSnapshot?.gradingSalt) return fallbackExam;
+  return {
+    ...fallbackExam,
+    id: data.examId,
+    title: data.examSnapshot.title || data.examTitle,
+    questionCount: data.examSnapshot.questions.length,
+    questions: data.examSnapshot.questions,
+    gradingSalt: data.examSnapshot.gradingSalt
+  };
+}
+
+async function serializeAttemptData(data, fallbackExam) {
+  const exam = getAttemptExam(data, fallbackExam);
   const startedAtMillis = timestampToMillis(data.startedAt);
   const result = {
     status: data.status,
@@ -111,6 +127,19 @@ function getExamAttemptId(examId, uid) {
   return `${examId}__${uid}`;
 }
 
+function attemptIsStillRunning(attempt) {
+  return attempt.status === 'in_progress'
+    && Date.now() < timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
+}
+
+async function getExamsWithRunningAttempts() {
+  const snapshot = await db.collection('examAttempts').get();
+  return new Set(snapshot.docs
+    .map(doc => doc.data())
+    .filter(attemptIsStillRunning)
+    .map(attempt => attempt.examId));
+}
+
 async function createExamOnFreeTier(data) {
   if (!isAdmin()) throw new Error('Área exclusiva do professor.');
   const title = String(data.title || 'Prova de Inglês').trim().slice(0, 120);
@@ -130,7 +159,13 @@ async function createExamOnFreeTier(data) {
     };
   }));
 
-  const activeSnapshot = await db.collection('exams').where('active', '==', true).get();
+  const [activeSnapshot, examsWithRunningAttempts] = await Promise.all([
+    db.collection('exams').where('active', '==', true).get(),
+    getExamsWithRunningAttempts()
+  ]);
+  if (activeSnapshot.docs.some(doc => examsWithRunningAttempts.has(doc.id))) {
+    throw new Error('Existe uma tentativa em andamento na prova atual. Aguarde o término antes de publicar outra prova.');
+  }
   const examRef = db.collection('exams').doc();
   const batch = db.batch();
   activeSnapshot.docs.forEach(doc => batch.update(doc.ref, {
@@ -140,16 +175,161 @@ async function createExamOnFreeTier(data) {
   batch.set(examRef, {
     title,
     active: true,
+    deleted: false,
     durationSeconds: EXAM_DURATION_SECONDS,
     questionCount: questions.length,
     questions,
     gradingSalt,
     createdBy: state.user.uid,
     createdByEmail: state.user.email,
-    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+    createdAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
   });
   await batch.commit();
   return { ok: true, examId: examRef.id, title, questionCount: questions.length };
+}
+
+function createManagedQuestionId() {
+  return `q_${crypto.randomUUID ? crypto.randomUUID() : createExamSalt()}`;
+}
+
+async function listRegisteredExamsOnFreeTier() {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const snapshot = await db.collection('exams').get();
+  const exams = snapshot.docs
+    .map(serializeExamDocument)
+    .filter(exam => !exam.deleted)
+    .sort((a, b) => {
+      if (a.active !== b.active) return a.active ? -1 : 1;
+      return (b.updatedAtMillis || b.createdAtMillis) - (a.updatedAtMillis || a.createdAtMillis);
+    });
+  return { exams };
+}
+
+async function updateExamOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const examId = String(data.examId || '');
+  const examRef = db.collection('exams').doc(examId);
+  const [examDoc, attemptsSnapshot] = await Promise.all([
+    examRef.get(),
+    db.collection('examAttempts').get()
+  ]);
+  if (!examDoc.exists || examDoc.data().deleted === true) throw new Error('Prova não encontrada.');
+  const relatedAttempts = attemptsSnapshot.docs
+    .map(doc => doc.data())
+    .filter(attempt => attempt.examId === examId);
+  const legacyAttempts = relatedAttempts.filter(attempt => !attempt.examSnapshot);
+  if (legacyAttempts.some(attemptIsStillRunning)) {
+    throw new Error('Esta prova possui uma tentativa antiga em andamento. Aguarde o término antes de editá-la.');
+  }
+
+  const existing = serializeExamDocument(examDoc);
+  const title = String(data.title || '').trim().slice(0, 120);
+  if (!title) throw new Error('Informe o título da prova.');
+  if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Mantenha pelo menos uma pergunta na prova.');
+  const existingById = new Map(existing.questions.map(question => [question.id, question]));
+  const questions = await Promise.all(data.questions.map(async (item, index) => {
+    const prompt = String(item?.prompt || '').trim();
+    const answer = String(item?.answer || '').trim();
+    const previous = existingById.get(item?.id);
+    if (!prompt) throw new Error(`Preencha a pergunta do item ${index + 1}.`);
+    if (prompt.length > 5000 || answer.length > 5000) throw new Error(`O item ${index + 1} excede o limite de 5.000 caracteres.`);
+    if (!answer && !previous?.answerHash) throw new Error(`Informe a resposta correta da nova questão ${index + 1}.`);
+    return {
+      id: previous?.id || createManagedQuestionId(),
+      prompt,
+      answerHash: answer ? await hashExamAnswer(answer, existing.gradingSalt) : previous.answerHash
+    };
+  }));
+
+  if (legacyAttempts.length) {
+    const replacementRef = db.collection('exams').doc();
+    const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+    const batch = db.batch();
+    batch.set(replacementRef, {
+      title,
+      active: existing.active,
+      deleted: false,
+      durationSeconds: existing.durationSeconds || EXAM_DURATION_SECONDS,
+      questionCount: questions.length,
+      questions,
+      gradingSalt: existing.gradingSalt,
+      createdBy: state.user.uid,
+      createdByEmail: state.user.email,
+      createdAt: serverTimestamp,
+      updatedAt: serverTimestamp,
+      previousVersionId: examId
+    });
+    batch.update(examRef, {
+      active: false,
+      deleted: true,
+      supersededBy: replacementRef.id,
+      deletedAt: serverTimestamp,
+      updatedAt: serverTimestamp
+    });
+    await batch.commit();
+    return { ok: true, examId: replacementRef.id, title, questionCount: questions.length, versioned: true };
+  }
+
+  await examRef.update({
+    title,
+    questions,
+    questionCount: questions.length,
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true, examId, title, questionCount: questions.length, versioned: false };
+}
+
+async function publishExamOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const examId = String(data.examId || '');
+  const targetRef = db.collection('exams').doc(examId);
+  const [targetDoc, activeSnapshot, examsWithRunningAttempts] = await Promise.all([
+    targetRef.get(),
+    db.collection('exams').where('active', '==', true).get(),
+    getExamsWithRunningAttempts()
+  ]);
+  if (!targetDoc.exists || targetDoc.data().deleted === true) throw new Error('Prova não encontrada.');
+  if (activeSnapshot.docs.some(doc => doc.id !== examId && examsWithRunningAttempts.has(doc.id))) {
+    throw new Error('Existe uma tentativa em andamento na prova atual. Aguarde o término antes de publicar outra prova.');
+  }
+
+  const batch = db.batch();
+  activeSnapshot.docs.forEach(doc => {
+    if (doc.id !== examId) batch.update(doc.ref, {
+      active: false,
+      archivedAt: firebase.firestore.FieldValue.serverTimestamp(),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  });
+  batch.update(targetRef, {
+    active: true,
+    publishedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  await batch.commit();
+  return { ok: true };
+}
+
+async function deleteExamOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const examId = String(data.examId || '');
+  const examRef = db.collection('exams').doc(examId);
+  const [examDoc, examsWithRunningAttempts] = await Promise.all([
+    examRef.get(),
+    getExamsWithRunningAttempts()
+  ]);
+  if (!examDoc.exists || examDoc.data().deleted === true) throw new Error('Prova não encontrada.');
+  if (examsWithRunningAttempts.has(examId)) {
+    throw new Error('Esta prova possui uma tentativa em andamento e não pode ser excluída agora.');
+  }
+  await examRef.update({
+    active: false,
+    deleted: true,
+    deletedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true };
 }
 
 async function getExamStateOnFreeTier() {
@@ -191,6 +371,11 @@ async function startExamOnFreeTier(data) {
       lastName,
       status: 'in_progress',
       startedAt: serverTimestamp,
+      examSnapshot: {
+        title: publicExam.title,
+        questions: publicExam.questions,
+        gradingSalt: publicExam.gradingSalt
+      },
       answers: sanitizeExamAnswers([], publicExam.questions),
       updatedAt: serverTimestamp
     });
@@ -213,8 +398,9 @@ async function saveExamAnswersOnFreeTier(data) {
     if (attempt.status !== 'in_progress') throw new Error('Esta prova já foi enviada.');
     const deadlineMillis = timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
     if (Date.now() >= deadlineMillis) throw new Error('O tempo da prova terminou.');
+    const attemptQuestions = attempt.examSnapshot?.questions || examDoc.data().questions || [];
     transaction.update(attemptRef, {
-      answers: sanitizeExamAnswers(data.answers, examDoc.data().questions || []),
+      answers: sanitizeExamAnswers(data.answers, attemptQuestions),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
     });
   });
@@ -233,11 +419,12 @@ async function submitExamOnFreeTier(data) {
     const attempt = attemptDoc.data();
     if (attempt.status === 'submitted') return publicExam;
 
+    const attemptExam = getAttemptExam(attempt, publicExam);
     const deadlineMillis = timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
     const isPastDeadline = Date.now() >= deadlineMillis;
     const answers = sanitizeExamAnswers(
       isPastDeadline || data.answers === undefined ? attempt.answers : data.answers,
-      publicExam.questions
+      attemptExam.questions
     );
     const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
     transaction.update(attemptRef, {
@@ -284,6 +471,10 @@ async function listExamResultsOnFreeTier() {
 
 const freeTierApi = {
   createExam: createExamOnFreeTier,
+  listRegisteredExams: listRegisteredExamsOnFreeTier,
+  updateExam: updateExamOnFreeTier,
+  publishExam: publishExamOnFreeTier,
+  deleteExam: deleteExamOnFreeTier,
   getExamState: getExamStateOnFreeTier,
   startExam: startExamOnFreeTier,
   saveExamAnswers: saveExamAnswersOnFreeTier,
@@ -389,7 +580,13 @@ const state = {
   teacherQuestions: [{ prompt: '', answer: '' }],
   teacherMessage: '',
   examResults: [],
-  examResultsStatus: 'idle'
+  examResultsStatus: 'idle',
+  teacherExams: [],
+  teacherExamsStatus: 'idle',
+  teacherExamsMessage: '',
+  editingExamId: null,
+  editingExamTitle: '',
+  editingExamQuestions: []
 };
 
 // --- Auth Observers ---
@@ -737,13 +934,16 @@ const viewRoutes = {
   home: '#/',
   exam: '#/prova',
   'teacher-create': '#/professor/criacao-de-prova',
+  'teacher-exams': '#/professor/provas-cadastradas',
   'teacher-results': '#/professor/resultados'
 };
 
 function getAuthorizedViewFromHash() {
   const route = window.location.hash || '#/';
   const requestedView = Object.entries(viewRoutes).find(([, hash]) => hash === route)?.[0] || 'home';
-  const teacherOnly = requestedView === 'teacher-create' || requestedView === 'teacher-results';
+  const teacherOnly = requestedView === 'teacher-create'
+    || requestedView === 'teacher-exams'
+    || requestedView === 'teacher-results';
 
   if (teacherOnly && !isAdmin()) return 'home';
   if (requestedView === 'exam' && isAdmin()) return 'home';
@@ -753,6 +953,7 @@ function getAuthorizedViewFromHash() {
 window.navigateTo = view => {
   const route = viewRoutes[view] || viewRoutes.home;
   if (view === 'exam') state.examScreen = 'idle';
+  if (view === 'teacher-exams') state.teacherExamsStatus = 'idle';
   if (view === 'teacher-results') state.examResultsStatus = 'idle';
   if (window.location.hash === route) {
     state.currentView = getAuthorizedViewFromHash();
@@ -786,6 +987,7 @@ function renderApp() {
   else if (state.currentView === 'quiz') renderQuiz();
   else if (state.currentView === 'exam' && !isAdmin()) renderExamPortal();
   else if (state.currentView === 'teacher-create' && isAdmin()) renderTeacherExamCreator();
+  else if (state.currentView === 'teacher-exams' && isAdmin()) renderTeacherExamManager();
   else if (state.currentView === 'teacher-results' && isAdmin()) renderTeacherResults();
   else {
     state.currentView = 'home';
@@ -845,6 +1047,7 @@ function updateHeader() {
       <button class="nav-btn ${state.currentView === 'home' ? 'active' : ''}" onclick="window.navigateTo('home')">Início</button>
       ${isAdmin() ? `
         <button class="nav-btn ${state.currentView === 'teacher-create' ? 'active' : ''}" onclick="window.navigateTo('teacher-create')">Criação de Prova</button>
+        <button class="nav-btn ${state.currentView === 'teacher-exams' ? 'active' : ''}" onclick="window.navigateTo('teacher-exams')">Provas cadastradas</button>
         <button class="nav-btn ${state.currentView === 'teacher-results' ? 'active' : ''}" onclick="window.navigateTo('teacher-results')">Resultados</button>
       ` : `
         <button class="nav-btn ${state.currentView === 'exam' ? 'active' : ''}" onclick="window.navigateTo('exam')">Prova</button>
@@ -1119,6 +1322,96 @@ function renderTeacherExamCreator() {
       </form>
     </section>
   `;
+}
+
+function renderTeacherExamManager() {
+  const mainContent = document.getElementById('main-content');
+  if (state.editingExamId) {
+    renderTeacherExamEditor(mainContent);
+    return;
+  }
+  if (state.teacherExamsStatus === 'idle') {
+    state.teacherExamsStatus = 'loading';
+    queueMicrotask(loadTeacherExams);
+  }
+
+  const content = state.teacherExamsStatus === 'loading'
+    ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando provas...</p></div>'
+    : state.teacherExamsStatus === 'error'
+      ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.teacherExamsMessage)}</p><button class="next-btn" onclick="window.refreshTeacherExams()">Tentar novamente</button></div>`
+      : state.teacherExams.length
+        ? `<div class="registered-exams-grid">
+            ${state.teacherExams.map(exam => `
+              <article class="registered-exam-card ${exam.active ? 'active' : ''}">
+                <div class="registered-exam-topline">
+                  <span class="exam-status-badge ${exam.active ? 'active' : 'inactive'}">${exam.active ? 'Disponível aos alunos' : 'Arquivada'}</span>
+                  <span class="registered-exam-date">${formatExamDate(exam.updatedAtMillis || exam.createdAtMillis)}</span>
+                </div>
+                <h3>${escapeHtml(exam.title)}</h3>
+                <p>${exam.questionCount} ${exam.questionCount === 1 ? 'questão cadastrada' : 'questões cadastradas'}</p>
+                <div class="registered-exam-actions">
+                  <button class="secondary-btn" onclick="window.startEditingExam('${exam.id}')">Editar</button>
+                  ${exam.active ? '' : `<button class="publish-exam-btn" onclick="window.publishRegisteredExam('${exam.id}')">Publicar</button>`}
+                  <button class="delete-exam-btn" onclick="window.deleteRegisteredExam('${exam.id}')">Excluir</button>
+                </div>
+              </article>
+            `).join('')}
+          </div>`
+        : `<div class="exam-empty"><div class="empty-icon">📄</div><h3>Nenhuma prova cadastrada</h3><p>Crie sua primeira avaliação para disponibilizá-la aos alunos.</p><button class="next-btn" onclick="window.navigateTo('teacher-create')">Criar prova</button></div>`;
+
+  mainContent.innerHTML = `
+    <section class="exam-page teacher-exams-manager">
+      <div class="exam-page-heading results-heading">
+        <div><span class="eyebrow">Área do professor</span><h2>Provas cadastradas</h2><p>Visualize, atualize, publique ou remova avaliações.</p></div>
+        <button class="secondary-btn" onclick="window.refreshTeacherExams()">Atualizar lista</button>
+      </div>
+      ${state.teacherExamsMessage && state.teacherExamsStatus !== 'error' ? `<div class="exam-alert ${state.teacherExamsMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.teacherExamsMessage)}</div>` : ''}
+      ${content}
+    </section>
+  `;
+}
+
+function renderTeacherExamEditor(mainContent) {
+  mainContent.innerHTML = `
+    <section class="exam-page teacher-exam-editor">
+      <div class="exam-page-heading">
+        <div><span class="eyebrow">Editar prova</span><h2>${escapeHtml(state.editingExamTitle)}</h2><p>Deixe a resposta correta em branco para manter o gabarito atual.</p></div>
+        <button class="secondary-btn" onclick="window.cancelExamEditing()">Cancelar edição</button>
+      </div>
+      <form class="exam-builder" onsubmit="window.submitExamUpdate(event)">
+        <label class="exam-field"><span>Título da prova</span><input type="text" maxlength="120" required value="${escapeHtml(state.editingExamTitle)}" oninput="window.updateEditingExamTitle(this.value)" /></label>
+        <div class="builder-heading"><h3>Perguntas e respostas</h3><span>${state.editingExamQuestions.length} ${state.editingExamQuestions.length === 1 ? 'questão' : 'questões'}</span></div>
+        <div class="question-builder-list">
+          ${state.editingExamQuestions.map((item, index) => `
+            <article class="question-builder-card">
+              <div class="question-builder-number">${index + 1}</div>
+              <label class="exam-field"><span>Pergunta</span><textarea required maxlength="5000" rows="3" oninput="window.updateEditingExamQuestion(${index}, 'prompt', this.value)">${escapeHtml(item.prompt)}</textarea></label>
+              <label class="exam-field correct-answer-field">
+                <span>Resposta correta ${item.id ? '<small>(opcional se não mudou)</small>' : '<small>(obrigatória)</small>'}</span>
+                <textarea ${item.id ? '' : 'required'} maxlength="5000" rows="2" placeholder="${item.id ? 'Deixe em branco para manter a resposta atual' : 'Digite a resposta correta'}" oninput="window.updateEditingExamQuestion(${index}, 'answer', this.value)">${escapeHtml(item.answer || '')}</textarea>
+              </label>
+              <button type="button" class="remove-question-btn" onclick="window.removeEditingExamQuestion(${index})" ${state.editingExamQuestions.length === 1 ? 'disabled' : ''}>Remover</button>
+            </article>
+          `).join('')}
+        </div>
+        <button type="button" class="add-question-btn" onclick="window.addEditingExamQuestion()"><span aria-hidden="true">+</span> Adicionar pergunta</button>
+        ${state.teacherExamsMessage ? `<div class="exam-alert ${state.teacherExamsMessage.startsWith('Erro:') ? 'error' : 'success'}">${escapeHtml(state.teacherExamsMessage)}</div>` : ''}
+        <button type="submit" class="next-btn confirm-exam-btn">Salvar alterações</button>
+      </form>
+    </section>
+  `;
+}
+
+async function loadTeacherExams() {
+  try {
+    const data = await callExamApi('listRegisteredExams');
+    state.teacherExams = data.exams || [];
+    state.teacherExamsStatus = 'ready';
+  } catch (error) {
+    state.teacherExamsStatus = 'error';
+    state.teacherExamsMessage = getFriendlyError(error, 'Não foi possível carregar as provas.');
+  }
+  if (state.currentView === 'teacher-exams') renderTeacherExamManager();
 }
 
 function renderTeacherResults() {
@@ -1423,11 +1716,125 @@ window.submitExamCreation = async event => {
     state.teacherMessage = `Prova criada com sucesso: ${result.questionCount} questão(ões) publicada(s).`;
     state.teacherExamTitle = 'Prova de Inglês';
     state.teacherQuestions = [{ prompt: '', answer: '' }];
+    state.teacherExamsStatus = 'idle';
     state.examResultsStatus = 'idle';
   } catch (error) {
     state.teacherMessage = getFriendlyError(error, 'Não foi possível criar a prova.');
   }
   renderTeacherExamCreator();
+};
+
+window.refreshTeacherExams = () => {
+  state.teacherExamsMessage = '';
+  state.teacherExamsStatus = 'idle';
+  renderTeacherExamManager();
+};
+
+window.startEditingExam = examId => {
+  const exam = state.teacherExams.find(item => item.id === examId);
+  if (!exam) return;
+  state.editingExamId = exam.id;
+  state.editingExamTitle = exam.title;
+  state.editingExamQuestions = exam.questions.map(question => ({
+    id: question.id,
+    prompt: question.prompt,
+    answer: ''
+  }));
+  state.teacherExamsMessage = '';
+  renderTeacherExamManager();
+};
+
+window.cancelExamEditing = () => {
+  state.editingExamId = null;
+  state.editingExamTitle = '';
+  state.editingExamQuestions = [];
+  state.teacherExamsMessage = '';
+  renderTeacherExamManager();
+};
+
+window.updateEditingExamTitle = value => {
+  state.editingExamTitle = value;
+};
+
+window.updateEditingExamQuestion = (index, field, value) => {
+  if (!state.editingExamQuestions[index] || !['prompt', 'answer'].includes(field)) return;
+  state.editingExamQuestions[index][field] = value;
+};
+
+window.addEditingExamQuestion = () => {
+  state.editingExamQuestions.push({ id: null, prompt: '', answer: '' });
+  renderTeacherExamManager();
+  requestAnimationFrame(() => document.querySelector('.question-builder-card:last-child textarea')?.focus());
+};
+
+window.removeEditingExamQuestion = index => {
+  if (state.editingExamQuestions.length <= 1) return;
+  state.editingExamQuestions.splice(index, 1);
+  renderTeacherExamManager();
+};
+
+window.submitExamUpdate = async event => {
+  event.preventDefault();
+  const submitButton = event.currentTarget.querySelector('.confirm-exam-btn');
+  submitButton.disabled = true;
+  submitButton.textContent = 'Salvando alterações...';
+  state.teacherExamsMessage = '';
+  try {
+    const result = await callExamApi('updateExam', {
+      examId: state.editingExamId,
+      title: state.editingExamTitle,
+      questions: state.editingExamQuestions
+    });
+    state.editingExamId = null;
+    state.editingExamTitle = '';
+    state.editingExamQuestions = [];
+    state.teacherExamsMessage = result.versioned
+      ? 'Nova versão da prova criada com sucesso. Resultados da versão anterior foram preservados.'
+      : 'Prova atualizada com sucesso. Resultados anteriores foram preservados.';
+    state.teacherExamsStatus = 'idle';
+    state.examResultsStatus = 'idle';
+  } catch (error) {
+    state.teacherExamsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível atualizar a prova.')}`;
+  }
+  renderTeacherExamManager();
+};
+
+window.publishRegisteredExam = async examId => {
+  if (!window.confirm('Deseja disponibilizar esta prova aos alunos? A prova ativa atual será arquivada.')) return;
+  state.teacherExamsStatus = 'loading';
+  state.teacherExamsMessage = '';
+  renderTeacherExamManager();
+  try {
+    await callExamApi('publishExam', { examId });
+    state.teacherExamsMessage = 'Prova publicada com sucesso.';
+    state.teacherExamsStatus = 'idle';
+    state.examScreen = 'idle';
+  } catch (error) {
+    state.teacherExamsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível publicar a prova.')}`;
+    state.teacherExamsStatus = 'ready';
+  }
+  renderTeacherExamManager();
+};
+
+window.deleteRegisteredExam = async examId => {
+  const exam = state.teacherExams.find(item => item.id === examId);
+  if (!exam) return;
+  const confirmed = window.confirm(`Excluir "${exam.title}"? Ela deixará de aparecer e não ficará disponível aos alunos. Os resultados já registrados serão preservados.`);
+  if (!confirmed) return;
+  state.teacherExamsStatus = 'loading';
+  state.teacherExamsMessage = '';
+  renderTeacherExamManager();
+  try {
+    await callExamApi('deleteExam', { examId });
+    state.teacherExamsMessage = 'Prova excluída com sucesso. Os resultados anteriores permanecem disponíveis.';
+    state.teacherExamsStatus = 'idle';
+    state.examResultsStatus = 'idle';
+    state.examScreen = 'idle';
+  } catch (error) {
+    state.teacherExamsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível excluir a prova.')}`;
+    state.teacherExamsStatus = 'ready';
+  }
+  renderTeacherExamManager();
 };
 
 window.refreshExamResults = () => {

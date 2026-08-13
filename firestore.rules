@@ -19,7 +19,7 @@ service cloud.firestore {
       let exam = get(/databases/$(database)/documents/exams/$(request.resource.data.examId));
       return request.resource.data.keys().hasOnly([
           'examId', 'examTitle', 'userId', 'userEmail', 'firstName', 'lastName',
-          'status', 'startedAt', 'answers', 'updatedAt'
+          'status', 'startedAt', 'examSnapshot', 'answers', 'updatedAt'
         ])
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.userEmail == request.auth.token.email
@@ -35,9 +35,15 @@ service cloud.firestore {
         && request.resource.data.startedAt is timestamp
         && request.resource.data.startedAt == request.time
         && request.resource.data.updatedAt == request.time
+        && request.resource.data.examSnapshot is map
+        && request.resource.data.examSnapshot.keys().hasOnly(['title', 'questions', 'gradingSalt'])
+        && request.resource.data.examSnapshot.title == exam.data.title
+        && request.resource.data.examSnapshot.questions == exam.data.questions
+        && request.resource.data.examSnapshot.gradingSalt == exam.data.gradingSalt
         && request.resource.data.answers is list
         && request.resource.data.answers.size() == exam.data.questionCount
-        && exam.data.active == true;
+        && exam.data.active == true
+        && (!exam.data.keys().hasAny(['deleted']) || exam.data.deleted == false);
     }
 
     function validAttemptUpdate() {
@@ -51,7 +57,10 @@ service cloud.firestore {
         && request.resource.data.lastName == resource.data.lastName
         && request.resource.data.startedAt == resource.data.startedAt;
       let validAnswers = request.resource.data.answers is list
-        && request.resource.data.answers.size() == exam.data.questionCount;
+        && ((resource.data.examSnapshot is map
+            && request.resource.data.answers.size() == resource.data.examSnapshot.questions.size())
+          || (!(resource.data.examSnapshot is map)
+            && request.resource.data.answers.size() == exam.data.questionCount));
       let validSave = request.resource.data.status == 'in_progress'
         && request.time < resource.data.startedAt + duration.value(2, 'h')
         && request.resource.data.updatedAt == request.time
