@@ -90,7 +90,9 @@ service cloud.firestore {
     }
 
     match /examAttempts/{attemptId} {
-      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow get: if signedIn()
+        && (attemptId.matches('.*__' + request.auth.uid) || isAdmin());
+      allow list: if isAdmin();
       allow create: if signedIn() && validAttemptCreate(attemptId);
       allow update: if signedIn()
         && resource.data.userId == request.auth.uid
