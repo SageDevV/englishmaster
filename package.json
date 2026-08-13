@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "node src/services/gameServices.test.js",
+    "test": "node src/services/gameServices.test.js && node src/services/examServices.test.js",
     "preview": "vite preview"
   },
   "devDependencies": {

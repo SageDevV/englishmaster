@@ -1,0 +1,101 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return signedIn()
+        && request.auth.token.email is string
+        && request.auth.token.email == 'pandredbz@gmail.com';
+    }
+
+    function ownsUser(userId) {
+      return signedIn() && request.auth.uid == userId;
+    }
+
+    function validAttemptCreate(attemptId) {
+      let exam = get(/databases/$(database)/documents/exams/$(request.resource.data.examId));
+      return request.resource.data.keys().hasOnly([
+          'examId', 'examTitle', 'userId', 'userEmail', 'firstName', 'lastName',
+          'status', 'startedAt', 'answers', 'updatedAt'
+        ])
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.userEmail == request.auth.token.email
+        && request.resource.data.examTitle == exam.data.title
+        && attemptId == request.resource.data.examId + '__' + request.auth.uid
+        && request.resource.data.status == 'in_progress'
+        && request.resource.data.firstName is string
+        && request.resource.data.firstName.size() >= 2
+        && request.resource.data.firstName.size() <= 80
+        && request.resource.data.lastName is string
+        && request.resource.data.lastName.size() >= 2
+        && request.resource.data.lastName.size() <= 80
+        && request.resource.data.startedAt is timestamp
+        && request.resource.data.startedAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && request.resource.data.answers is list
+        && request.resource.data.answers.size() == exam.data.questionCount
+        && exam.data.active == true;
+    }
+
+    function validAttemptUpdate() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      let exam = get(/databases/$(database)/documents/exams/$(resource.data.examId));
+      let immutableFieldsMatch = request.resource.data.examId == resource.data.examId
+        && request.resource.data.examTitle == resource.data.examTitle
+        && request.resource.data.userId == resource.data.userId
+        && request.resource.data.userEmail == resource.data.userEmail
+        && request.resource.data.firstName == resource.data.firstName
+        && request.resource.data.lastName == resource.data.lastName
+        && request.resource.data.startedAt == resource.data.startedAt;
+      let validAnswers = request.resource.data.answers is list
+        && request.resource.data.answers.size() == exam.data.questionCount;
+      let validSave = request.resource.data.status == 'in_progress'
+        && request.time < resource.data.startedAt + duration.value(2, 'h')
+        && request.resource.data.updatedAt == request.time
+        && changed.hasOnly(['answers', 'updatedAt']);
+      let validSubmission = request.resource.data.status == 'submitted'
+        && request.resource.data.submittedAt is timestamp
+        && request.resource.data.submittedAt == request.time
+        && request.resource.data.updatedAt == request.time
+        && changed.hasOnly(['answers', 'status', 'submittedAt', 'updatedAt'])
+        && (request.time < resource.data.startedAt + duration.value(2, 'h')
+          || request.resource.data.answers == resource.data.answers);
+      return resource.data.status == 'in_progress'
+        && immutableFieldsMatch
+        && validAnswers
+        && (validSave || validSubmission);
+    }
+
+    match /users/{userId} {
+      allow read: if signedIn();
+      allow create, update: if ownsUser(userId);
+      allow delete: if false;
+    }
+
+    match /gameResults/{resultId} {
+      allow read: if signedIn();
+      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // O gabarito é armazenado apenas como hashes SHA-256. Leituras exigem login
+    // e somente o professor identificado pode criar, publicar ou arquivar provas.
+    match /exams/{examId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /examAttempts/{attemptId} {
+      allow read: if signedIn() && (resource.data.userId == request.auth.uid || isAdmin());
+      allow create: if signedIn() && validAttemptCreate(attemptId);
+      allow update: if signedIn()
+        && resource.data.userId == request.auth.uid
+        && validAttemptUpdate();
+      allow delete: if false;
+    }
+  }
+}

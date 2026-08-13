@@ -19,6 +19,13 @@ import {
   sanitizeNickname,
   validateNickname
 } from './src/services/gameServices.js';
+import {
+  calculateExamElapsedSeconds,
+  gradeExamAnswers,
+  hashExamAnswer,
+  sanitizeExamAnswers,
+  validateStudentName
+} from './src/services/examServices.js';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -37,6 +44,258 @@ if (typeof firebase !== 'undefined') {
 
 const auth = firebase.auth();
 const db = firebase.firestore();
+
+const ADMIN_EMAIL = 'pandredbz@gmail.com';
+const EXAM_DURATION_SECONDS = 2 * 60 * 60;
+
+function isAdmin() {
+  return String(state.user?.email || '').trim().toLowerCase() === ADMIN_EMAIL;
+}
+
+function getFriendlyError(error, fallback = 'Não foi possível concluir a operação.') {
+  const message = String(error?.message || '').replace(/^FirebaseError:\s*/i, '').trim();
+  return message || fallback;
+}
+
+function createExamSalt() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function timestampToMillis(value) {
+  return value?.toMillis ? value.toMillis() : Number(value || 0);
+}
+
+function serializeExamDocument(doc) {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    title: data.title,
+    durationSeconds: data.durationSeconds,
+    questionCount: data.questionCount,
+    questions: data.questions || [],
+    gradingSalt: data.gradingSalt,
+    createdAtMillis: timestampToMillis(data.createdAt)
+  };
+}
+
+async function serializeAttemptData(data, exam) {
+  const startedAtMillis = timestampToMillis(data.startedAt);
+  const result = {
+    status: data.status,
+    firstName: data.firstName,
+    lastName: data.lastName,
+    answers: data.answers || [],
+    startedAtMillis,
+    endsAtMillis: startedAtMillis + EXAM_DURATION_SECONDS * 1000,
+    submittedAtMillis: timestampToMillis(data.submittedAt),
+    elapsedSeconds: data.submittedAt
+      ? calculateExamElapsedSeconds(
+          timestampToMillis(data.startedAt),
+          timestampToMillis(data.submittedAt),
+          EXAM_DURATION_SECONDS
+        )
+      : null
+  };
+  if (data.status === 'submitted') Object.assign(result, await gradeExamAnswers(exam, data.answers));
+  return result;
+}
+
+async function getActiveExamDocument() {
+  const snapshot = await db.collection('exams').where('active', '==', true).get();
+  if (snapshot.empty) return null;
+  return snapshot.docs.sort((a, b) => timestampToMillis(b.data().createdAt) - timestampToMillis(a.data().createdAt))[0];
+}
+
+function getExamAttemptId(examId, uid) {
+  return `${examId}__${uid}`;
+}
+
+async function createExamOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const title = String(data.title || 'Prova de Inglês').trim().slice(0, 120);
+  if (!title) throw new Error('Informe o título da prova.');
+  if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Adicione pelo menos uma pergunta à prova.');
+
+  const gradingSalt = createExamSalt();
+  const questions = await Promise.all(data.questions.map(async (item, index) => {
+    const prompt = String(item?.prompt || '').trim();
+    const answer = String(item?.answer || '').trim();
+    if (!prompt || !answer) throw new Error(`Preencha a pergunta e a resposta correta do item ${index + 1}.`);
+    if (prompt.length > 5000 || answer.length > 5000) throw new Error(`O item ${index + 1} excede o limite de 5.000 caracteres.`);
+    return {
+      id: `q${index + 1}`,
+      prompt,
+      answerHash: await hashExamAnswer(answer, gradingSalt)
+    };
+  }));
+
+  const activeSnapshot = await db.collection('exams').where('active', '==', true).get();
+  const examRef = db.collection('exams').doc();
+  const batch = db.batch();
+  activeSnapshot.docs.forEach(doc => batch.update(doc.ref, {
+    active: false,
+    archivedAt: firebase.firestore.FieldValue.serverTimestamp()
+  }));
+  batch.set(examRef, {
+    title,
+    active: true,
+    durationSeconds: EXAM_DURATION_SECONDS,
+    questionCount: questions.length,
+    questions,
+    gradingSalt,
+    createdBy: state.user.uid,
+    createdByEmail: state.user.email,
+    createdAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  await batch.commit();
+  return { ok: true, examId: examRef.id, title, questionCount: questions.length };
+}
+
+async function getExamStateOnFreeTier() {
+  const examDoc = await getActiveExamDocument();
+  if (!examDoc) return { exam: null, attempt: null };
+  const exam = serializeExamDocument(examDoc);
+  const attemptRef = db.collection('examAttempts').doc(getExamAttemptId(exam.id, state.user.uid));
+  const attemptDoc = await attemptRef.get();
+  if (!attemptDoc.exists) return { exam, attempt: null };
+  const rawAttempt = attemptDoc.data();
+  const deadlineMillis = timestampToMillis(rawAttempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
+  if (rawAttempt.status === 'in_progress' && Date.now() >= deadlineMillis) {
+    return { exam, attempt: await submitExamOnFreeTier({ examId: exam.id }) };
+  }
+  return { exam, attempt: await serializeAttemptData(rawAttempt, exam) };
+}
+
+async function startExamOnFreeTier(data) {
+  const examId = String(data.examId || '');
+  const firstName = validateStudentName(data.firstName, 'Nome');
+  const lastName = validateStudentName(data.lastName, 'Sobrenome');
+  const examRef = db.collection('exams').doc(examId);
+  const attemptRef = db.collection('examAttempts').doc(getExamAttemptId(examId, state.user.uid));
+
+  const exam = await db.runTransaction(async transaction => {
+    const examDoc = await transaction.get(examRef);
+    const attemptDoc = await transaction.get(attemptRef);
+    if (!examDoc.exists || examDoc.data().active !== true) throw new Error('Esta prova não está mais disponível.');
+    if (attemptDoc.exists) throw new Error('Você já iniciou esta prova. A tentativa é única.');
+
+    const publicExam = serializeExamDocument(examDoc);
+    const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+    transaction.set(attemptRef, {
+      examId,
+      examTitle: publicExam.title,
+      userId: state.user.uid,
+      userEmail: state.user.email || '',
+      firstName,
+      lastName,
+      status: 'in_progress',
+      startedAt: serverTimestamp,
+      answers: sanitizeExamAnswers([], publicExam.questions),
+      updatedAt: serverTimestamp
+    });
+    return publicExam;
+  });
+
+  const createdAttempt = await attemptRef.get();
+  return { exam, attempt: await serializeAttemptData(createdAttempt.data(), exam) };
+}
+
+async function saveExamAnswersOnFreeTier(data) {
+  const examId = String(data.examId || '');
+  const examRef = db.collection('exams').doc(examId);
+  const attemptRef = db.collection('examAttempts').doc(getExamAttemptId(examId, state.user.uid));
+  await db.runTransaction(async transaction => {
+    const examDoc = await transaction.get(examRef);
+    const attemptDoc = await transaction.get(attemptRef);
+    if (!examDoc.exists || !attemptDoc.exists) throw new Error('Tentativa não encontrada.');
+    const attempt = attemptDoc.data();
+    if (attempt.status !== 'in_progress') throw new Error('Esta prova já foi enviada.');
+    const deadlineMillis = timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
+    if (Date.now() >= deadlineMillis) throw new Error('O tempo da prova terminou.');
+    transaction.update(attemptRef, {
+      answers: sanitizeExamAnswers(data.answers, examDoc.data().questions || []),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+  });
+  return { ok: true };
+}
+
+async function submitExamOnFreeTier(data) {
+  const examId = String(data.examId || '');
+  const examRef = db.collection('exams').doc(examId);
+  const attemptRef = db.collection('examAttempts').doc(getExamAttemptId(examId, state.user.uid));
+  const exam = await db.runTransaction(async transaction => {
+    const examDoc = await transaction.get(examRef);
+    const attemptDoc = await transaction.get(attemptRef);
+    if (!examDoc.exists || !attemptDoc.exists) throw new Error('Tentativa não encontrada.');
+    const publicExam = serializeExamDocument(examDoc);
+    const attempt = attemptDoc.data();
+    if (attempt.status === 'submitted') return publicExam;
+
+    const deadlineMillis = timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
+    const isPastDeadline = Date.now() >= deadlineMillis;
+    const answers = sanitizeExamAnswers(
+      isPastDeadline || data.answers === undefined ? attempt.answers : data.answers,
+      publicExam.questions
+    );
+    const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+    transaction.update(attemptRef, {
+      status: 'submitted',
+      answers,
+      submittedAt: serverTimestamp,
+      updatedAt: serverTimestamp
+    });
+    return publicExam;
+  });
+  const submittedAttempt = await attemptRef.get();
+  return serializeAttemptData(submittedAttempt.data(), exam);
+}
+
+async function listExamResultsOnFreeTier() {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const attemptsSnapshot = await db.collection('examAttempts').get();
+  const submitted = attemptsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter(item => item.status === 'submitted');
+  const examIds = [...new Set(submitted.map(item => item.examId))];
+  const examDocs = await Promise.all(examIds.map(id => db.collection('exams').doc(id).get()));
+  const exams = new Map(examDocs.filter(doc => doc.exists).map(doc => [doc.id, serializeExamDocument(doc)]));
+  const results = [];
+  for (const item of submitted) {
+    const exam = exams.get(item.examId);
+    if (!exam) continue;
+    const computed = await serializeAttemptData(item, exam);
+    results.push({
+      id: item.id,
+      examId: item.examId,
+      examTitle: item.examTitle,
+      firstName: item.firstName,
+      lastName: item.lastName,
+      userEmail: item.userEmail,
+      elapsedSeconds: computed.elapsedSeconds,
+      correctCount: computed.correctCount,
+      totalQuestions: computed.totalQuestions,
+      percentage: computed.percentage,
+      submittedAtMillis: computed.submittedAtMillis
+    });
+  }
+  results.sort((a, b) => b.submittedAtMillis - a.submittedAtMillis);
+  return { results };
+}
+
+const freeTierApi = {
+  createExam: createExamOnFreeTier,
+  getExamState: getExamStateOnFreeTier,
+  startExam: startExamOnFreeTier,
+  saveExamAnswers: saveExamAnswersOnFreeTier,
+  submitExam: submitExamOnFreeTier,
+  listExamResults: listExamResultsOnFreeTier
+};
+
+async function callExamApi(name, data = {}) {
+  const operation = freeTierApi[name];
+  if (!operation) throw new Error('Operação de avaliação desconhecida.');
+  return operation(data);
+}
 
 // --- Game Balance ---
 const XP_PER_LEVEL = 100;
@@ -116,7 +375,21 @@ const state = {
   resultReason: 'completed',
   resultPersisted: false,
   leaderboard: [],
-  userStats: createDefaultStats()
+  userStats: createDefaultStats(),
+  exam: null,
+  examAttempt: null,
+  examAnswers: [],
+  examScreen: 'idle',
+  examMessage: '',
+  pendingIdentity: null,
+  examSaveTimer: null,
+  examSubmitting: false,
+  examAutoSubmitAttempted: false,
+  teacherExamTitle: 'Prova de Inglês',
+  teacherQuestions: [{ prompt: '', answer: '' }],
+  teacherMessage: '',
+  examResults: [],
+  examResultsStatus: 'idle'
 };
 
 // --- Auth Observers ---
@@ -135,7 +408,10 @@ auth.onAuthStateChanged(async (user) => {
       }
       
       await loadLeaderboardFromFirestore();
-      state.currentView = 'home';
+      state.currentView = getAuthorizedViewFromHash();
+      if (!window.location.hash) {
+        window.history.replaceState(null, '', '#/');
+      }
     } else {
       state.user = null;
       state.currentView = 'login';
@@ -456,6 +732,48 @@ function addXP(amount) {
   updateHeader();
 }
 
+// --- Application Routes ---
+const viewRoutes = {
+  home: '#/',
+  exam: '#/prova',
+  'teacher-create': '#/professor/criacao-de-prova',
+  'teacher-results': '#/professor/resultados'
+};
+
+function getAuthorizedViewFromHash() {
+  const route = window.location.hash || '#/';
+  const requestedView = Object.entries(viewRoutes).find(([, hash]) => hash === route)?.[0] || 'home';
+  const teacherOnly = requestedView === 'teacher-create' || requestedView === 'teacher-results';
+
+  if (teacherOnly && !isAdmin()) return 'home';
+  if (requestedView === 'exam' && isAdmin()) return 'home';
+  return requestedView;
+}
+
+window.navigateTo = view => {
+  const route = viewRoutes[view] || viewRoutes.home;
+  if (view === 'exam') state.examScreen = 'idle';
+  if (view === 'teacher-results') state.examResultsStatus = 'idle';
+  if (window.location.hash === route) {
+    state.currentView = getAuthorizedViewFromHash();
+    renderApp();
+    return;
+  }
+  window.location.hash = route;
+};
+
+window.addEventListener('hashchange', () => {
+  if (!state.user) return;
+  stopTimer();
+  if (state.examSaveTimer) clearTimeout(state.examSaveTimer);
+  state.currentView = getAuthorizedViewFromHash();
+  const authorizedRoute = viewRoutes[state.currentView];
+  if (window.location.hash !== authorizedRoute) {
+    window.history.replaceState(null, '', authorizedRoute);
+  }
+  renderApp();
+});
+
 // --- UI Rendering ---
 function renderApp() {
   if (!state.user) {
@@ -466,6 +784,13 @@ function renderApp() {
   updateHeader();
   if (state.currentView === 'home') renderHome();
   else if (state.currentView === 'quiz') renderQuiz();
+  else if (state.currentView === 'exam' && !isAdmin()) renderExamPortal();
+  else if (state.currentView === 'teacher-create' && isAdmin()) renderTeacherExamCreator();
+  else if (state.currentView === 'teacher-results' && isAdmin()) renderTeacherResults();
+  else {
+    state.currentView = 'home';
+    renderHome();
+  }
 }
 
 function renderLogin() {
@@ -515,6 +840,16 @@ function updateHeader() {
         </div>
       </div>
     </div>
+
+    <nav class="app-nav" aria-label="Navegação principal">
+      <button class="nav-btn ${state.currentView === 'home' ? 'active' : ''}" onclick="window.navigateTo('home')">Início</button>
+      ${isAdmin() ? `
+        <button class="nav-btn ${state.currentView === 'teacher-create' ? 'active' : ''}" onclick="window.navigateTo('teacher-create')">Criação de Prova</button>
+        <button class="nav-btn ${state.currentView === 'teacher-results' ? 'active' : ''}" onclick="window.navigateTo('teacher-results')">Resultados</button>
+      ` : `
+        <button class="nav-btn ${state.currentView === 'exam' ? 'active' : ''}" onclick="window.navigateTo('exam')">Prova</button>
+      `}
+    </nav>
 
     <div class="user-stats">
       <div class="level-badge">Nível <span id="user-level">${state.userStats.level}</span></div>
@@ -713,6 +1048,457 @@ function renderLeaderboard() {
     </section>
   `;
 }
+
+function formatExamTime(totalSeconds) {
+  const safeSeconds = Math.max(0, Number(totalSeconds) || 0);
+  const hours = Math.floor(safeSeconds / 3600);
+  const minutes = Math.floor((safeSeconds % 3600) / 60);
+  const seconds = Math.floor(safeSeconds % 60);
+  return [hours, minutes, seconds].map(value => String(value).padStart(2, '0')).join(':');
+}
+
+function formatExamDate(timestamp) {
+  if (!timestamp) return '--';
+  return new Intl.DateTimeFormat('pt-BR', {
+    dateStyle: 'short',
+    timeStyle: 'short'
+  }).format(new Date(timestamp));
+}
+
+function renderTeacherExamCreator() {
+  const mainContent = document.getElementById('main-content');
+  mainContent.innerHTML = `
+    <section class="exam-page teacher-exam-page">
+      <div class="exam-page-heading">
+        <div>
+          <span class="eyebrow">Área do professor</span>
+          <h2>Criação de Prova</h2>
+          <p>Monte o gabarito. Ao confirmar, esta prova substituirá a avaliação atualmente disponível.</p>
+        </div>
+      </div>
+
+      <form class="exam-builder" onsubmit="window.submitExamCreation(event)">
+        <label class="exam-field">
+          <span>Título da prova</span>
+          <input type="text" maxlength="120" required value="${escapeHtml(state.teacherExamTitle)}"
+            oninput="window.updateTeacherExamTitle(this.value)" placeholder="Ex.: Avaliação de Inglês - Unidade 1" />
+        </label>
+
+        <div class="builder-heading">
+          <h3>Perguntas e respostas</h3>
+          <span>${state.teacherQuestions.length} ${state.teacherQuestions.length === 1 ? 'questão' : 'questões'}</span>
+        </div>
+
+        <div class="question-builder-list">
+          ${state.teacherQuestions.map((item, index) => `
+            <article class="question-builder-card">
+              <div class="question-builder-number">${index + 1}</div>
+              <label class="exam-field">
+                <span>Pergunta</span>
+                <textarea required maxlength="5000" rows="3" placeholder="Digite a pergunta"
+                  oninput="window.updateTeacherQuestion(${index}, 'prompt', this.value)">${escapeHtml(item.prompt)}</textarea>
+              </label>
+              <label class="exam-field correct-answer-field">
+                <span>Resposta correta</span>
+                <textarea required maxlength="5000" rows="2" placeholder="Digite a resposta esperada"
+                  oninput="window.updateTeacherQuestion(${index}, 'answer', this.value)">${escapeHtml(item.answer)}</textarea>
+              </label>
+              <button type="button" class="remove-question-btn" onclick="window.removeTeacherQuestion(${index})"
+                ${state.teacherQuestions.length === 1 ? 'disabled' : ''} aria-label="Remover questão ${index + 1}">Remover</button>
+            </article>
+          `).join('')}
+        </div>
+
+        <button type="button" class="add-question-btn" onclick="window.addTeacherQuestion()">
+          <span aria-hidden="true">+</span> Adicionar pergunta
+        </button>
+
+        ${state.teacherMessage ? `<div class="exam-alert ${state.teacherMessage.startsWith('Prova criada') ? 'success' : 'error'}" role="status">${escapeHtml(state.teacherMessage)}</div>` : ''}
+
+        <button type="submit" class="next-btn confirm-exam-btn">Confirmar Criação</button>
+      </form>
+    </section>
+  `;
+}
+
+function renderTeacherResults() {
+  const mainContent = document.getElementById('main-content');
+  if (state.examResultsStatus === 'idle') {
+    state.examResultsStatus = 'loading';
+    queueMicrotask(loadTeacherResults);
+  }
+
+  const content = state.examResultsStatus === 'loading'
+    ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando resultados...</p></div>'
+    : state.examResultsStatus === 'error'
+      ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.examMessage)}</p><button class="next-btn" onclick="window.refreshExamResults()">Tentar novamente</button></div>`
+      : state.examResults.length
+        ? `
+          <div class="results-table-wrap">
+            <table class="results-table">
+              <thead><tr><th>Aluno</th><th>Prova</th><th>Tempo total</th><th>Nota</th><th>Enviada em</th></tr></thead>
+              <tbody>
+                ${state.examResults.map(result => `
+                  <tr>
+                    <td><strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong><small>${escapeHtml(result.userEmail || '')}</small></td>
+                    <td>${escapeHtml(result.examTitle || 'Prova')}</td>
+                    <td>${formatExamTime(result.elapsedSeconds)}</td>
+                    <td><span class="grade-pill">${result.correctCount}/${result.totalQuestions} · ${result.percentage}%</span></td>
+                    <td>${formatExamDate(result.submittedAtMillis)}</td>
+                  </tr>
+                `).join('')}
+              </tbody>
+            </table>
+          </div>`
+        : '<div class="exam-empty"><h3>Nenhuma prova realizada</h3><p>Os resultados aparecerão aqui assim que os alunos enviarem a avaliação.</p></div>';
+
+  mainContent.innerHTML = `
+    <section class="exam-page teacher-results-page">
+      <div class="exam-page-heading results-heading">
+        <div><span class="eyebrow">Área do professor</span><h2>Dashboard de Resultados</h2><p>Acompanhe notas e duração das avaliações enviadas.</p></div>
+        <button class="secondary-btn" onclick="window.refreshExamResults()">Atualizar</button>
+      </div>
+      ${content}
+    </section>
+  `;
+}
+
+async function loadTeacherResults() {
+  try {
+    const data = await callExamApi('listExamResults');
+    state.examResults = data.results || [];
+    state.examResultsStatus = 'ready';
+  } catch (error) {
+    state.examResultsStatus = 'error';
+    state.examMessage = getFriendlyError(error, 'Não foi possível carregar os resultados.');
+  }
+  if (state.currentView === 'teacher-results') renderTeacherResults();
+}
+
+function renderExamPortal() {
+  const mainContent = document.getElementById('main-content');
+  if (state.examScreen === 'idle') {
+    state.examScreen = 'loading';
+    queueMicrotask(loadExamPortal);
+  }
+
+  if (state.examScreen === 'loading') {
+    mainContent.innerHTML = '<section class="exam-page"><div class="exam-loading"><div class="loading-spinner"></div><p>Carregando prova...</p></div></section>';
+    return;
+  }
+  if (state.examScreen === 'error') {
+    mainContent.innerHTML = `<section class="exam-page"><div class="exam-empty"><h2>Não foi possível abrir a prova</h2><p>${escapeHtml(state.examMessage)}</p><button class="next-btn" onclick="window.reloadExamPortal()">Tentar novamente</button></div></section>`;
+    return;
+  }
+  if (state.examScreen === 'empty' || !state.exam) {
+    mainContent.innerHTML = '<section class="exam-page"><div class="exam-empty"><div class="empty-icon">📝</div><h2>Nenhuma prova disponível</h2><p>O professor ainda não publicou uma avaliação. Volte mais tarde.</p></div></section>';
+    return;
+  }
+  if (state.examScreen === 'instructions') {
+    renderExamInstructions(mainContent);
+    return;
+  }
+  if (state.examScreen === 'taking') {
+    renderActiveExam(mainContent);
+    return;
+  }
+  if (state.examScreen === 'result') {
+    renderExamResult(mainContent);
+    return;
+  }
+
+  mainContent.innerHTML = `
+    <section class="exam-page identification-page">
+      <div class="exam-card identification-card">
+        <span class="eyebrow">${escapeHtml(state.exam.title)}</span>
+        <h2>Identificação do aluno</h2>
+        <p class="identity-warning">Insira seu nome e sobrenome verdadeiros. Não utilize nicknames.</p>
+        <form class="identity-form" onsubmit="window.continueToExamInstructions(event)">
+          <label class="exam-field"><span>Nome</span><input name="firstName" type="text" minlength="2" maxlength="80" required autocomplete="given-name" /></label>
+          <label class="exam-field"><span>Sobrenome</span><input name="lastName" type="text" minlength="2" maxlength="80" required autocomplete="family-name" /></label>
+          <button class="next-btn" type="submit">Continuar</button>
+        </form>
+      </div>
+    </section>
+  `;
+}
+
+function renderExamInstructions(mainContent) {
+  const identity = state.pendingIdentity || {};
+  mainContent.innerHTML = `
+    <section class="exam-page instructions-page">
+      <div class="exam-card instructions-card">
+        <span class="eyebrow">Antes de começar</span>
+        <h2>Leia as regras da avaliação</h2>
+        <div class="rule-notice">
+          <div class="rule-icon">!</div>
+          <div>
+            <h3>Aviso contra fraude</h3>
+            <p>Este computador será monitorado contra o uso de internet ou Inteligências Artificiais durante a avaliação. Qualquer fraude identificada anulará a prova.</p>
+          </div>
+        </div>
+        <ul class="exam-rules">
+          <li>Você terá <strong>2 horas</strong> a partir da confirmação.</li>
+          <li>A tentativa é <strong>única</strong> e não poderá ser reiniciada.</li>
+          <li>Ao zerar o cronômetro, as respostas preenchidas serão enviadas automaticamente.</li>
+          <li>Confira seu nome: <strong>${escapeHtml(`${identity.firstName || ''} ${identity.lastName || ''}`)}</strong>.</li>
+        </ul>
+        ${state.examMessage ? `<div class="exam-alert error">${escapeHtml(state.examMessage)}</div>` : ''}
+        <div class="instruction-actions">
+          <button class="secondary-btn" onclick="window.backToExamIdentification()">Corrigir nome</button>
+          <button class="next-btn" onclick="window.confirmExamStart()">Confirmar e iniciar prova</button>
+        </div>
+      </div>
+    </section>
+  `;
+}
+
+function renderActiveExam(mainContent) {
+  const attempt = state.examAttempt;
+  const questions = state.exam.questions || [];
+  mainContent.innerHTML = `
+    <section class="exam-page active-exam-page">
+      <div class="active-exam-topbar">
+        <div><span class="eyebrow">Em andamento</span><h2>${escapeHtml(state.exam.title)}</h2><p>${escapeHtml(`${attempt.firstName} ${attempt.lastName}`)}</p></div>
+        <div class="exam-countdown" aria-live="polite"><span>Tempo restante</span><strong id="exam-countdown">${formatExamTime(Math.ceil((attempt.endsAtMillis - Date.now()) / 1000))}</strong></div>
+      </div>
+      <div id="exam-save-status" class="exam-save-status">Respostas salvas automaticamente</div>
+      <form class="student-question-list" onsubmit="window.submitExamManually(event)">
+        ${questions.map((question, index) => `
+          <article class="student-question-card">
+            <div class="student-question-number">Questão ${index + 1} de ${questions.length}</div>
+            <h3>${escapeHtml(question.prompt)}</h3>
+            <label class="exam-field"><span>Sua resposta</span><textarea rows="4" maxlength="5000" placeholder="Digite sua resposta" oninput="window.updateStudentExamAnswer(${index}, this.value)">${escapeHtml(state.examAnswers[index]?.value || '')}</textarea></label>
+          </article>
+        `).join('')}
+        ${state.examMessage ? `<div class="exam-alert error" role="alert">${escapeHtml(state.examMessage)}</div>` : ''}
+        <button class="next-btn submit-exam-btn" type="submit" ${state.examSubmitting ? 'disabled' : ''}>${state.examSubmitting ? 'Enviando...' : 'Enviar prova'}</button>
+      </form>
+    </section>
+  `;
+  startExamCountdown();
+}
+
+function renderExamResult(mainContent) {
+  const result = state.examAttempt;
+  const feedback = result.feedback || [];
+  mainContent.innerHTML = `
+    <section class="exam-page exam-result-page">
+      <div class="exam-result-summary">
+        <span class="eyebrow">Prova corrigida</span>
+        <h2>${escapeHtml(state.exam.title)}</h2>
+        <div class="result-grade">${result.percentage}%</div>
+        <p>Você acertou <strong>${result.correctCount}</strong> de <strong>${result.totalQuestions}</strong> questões.</p>
+        <div class="result-meta"><span>Tempo total: <strong>${formatExamTime(result.elapsedSeconds)}</strong></span><span>Aluno: <strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong></span></div>
+      </div>
+      <div class="feedback-list">
+        <h3>Feedback da avaliação</h3>
+        ${feedback.map((item, index) => `
+          <article class="feedback-card ${item.isCorrect ? 'correct' : 'incorrect'}">
+            <div class="feedback-status">${item.isCorrect ? '✓ Correta' : '✕ Incorreta'}</div>
+            <h4>${index + 1}. ${escapeHtml(item.prompt)}</h4>
+            <p><span>Sua resposta:</span> ${escapeHtml(item.studentAnswer || 'Não respondida')}</p>
+            ${item.isCorrect ? '' : '<p><span>Feedback:</span> Sua resposta não corresponde ao gabarito.</p>'}
+          </article>
+        `).join('')}
+      </div>
+    </section>
+  `;
+}
+
+async function loadExamPortal() {
+  try {
+    const data = await callExamApi('getExamState');
+    state.exam = data.exam;
+    state.examAttempt = data.attempt;
+    state.examMessage = '';
+    if (!data.exam) {
+      state.examScreen = 'empty';
+    } else if (!data.attempt) {
+      state.examScreen = 'identify';
+    } else if (data.attempt.status === 'submitted') {
+      state.examScreen = 'result';
+    } else {
+      state.examAnswers = data.attempt.answers || [];
+      state.examAutoSubmitAttempted = false;
+      state.examScreen = 'taking';
+    }
+  } catch (error) {
+    state.examScreen = 'error';
+    state.examMessage = getFriendlyError(error, 'Não foi possível carregar a prova.');
+  }
+  if (state.currentView === 'exam') renderExamPortal();
+}
+
+function startExamCountdown() {
+  stopTimer();
+  const tick = () => {
+    const remaining = Math.max(0, Math.ceil((state.examAttempt.endsAtMillis - Date.now()) / 1000));
+    const timerElement = document.getElementById('exam-countdown');
+    if (timerElement) {
+      timerElement.textContent = formatExamTime(remaining);
+      timerElement.parentElement.classList.toggle('low-time', remaining <= 300);
+    }
+    if (remaining <= 0) {
+      stopTimer();
+      if (!state.examAutoSubmitAttempted) submitCurrentExam(true);
+    }
+  };
+  tick();
+  if (state.examScreen === 'taking' && !state.examSubmitting) {
+    state.timerId = setInterval(tick, 1000);
+  }
+}
+
+async function saveCurrentExamAnswers() {
+  if (state.examScreen !== 'taking' || !state.exam?.id || state.examSubmitting) return;
+  const status = document.getElementById('exam-save-status');
+  if (status) status.textContent = 'Salvando respostas...';
+  try {
+    await callExamApi('saveExamAnswers', { examId: state.exam.id, answers: state.examAnswers });
+    if (status) status.textContent = 'Respostas salvas automaticamente';
+  } catch (error) {
+    if (status) status.textContent = 'Não foi possível salvar agora; o envio final ainda será tentado.';
+  }
+}
+
+async function submitCurrentExam(autoSubmitted = false) {
+  if (state.examSubmitting || state.examScreen !== 'taking') return;
+  if (autoSubmitted) state.examAutoSubmitAttempted = true;
+  state.examSubmitting = true;
+  state.examMessage = '';
+  stopTimer();
+  if (state.examSaveTimer) clearTimeout(state.examSaveTimer);
+  renderExamPortal();
+  try {
+    const result = await callExamApi('submitExam', {
+      examId: state.exam.id,
+      answers: state.examAnswers
+    });
+    state.examAttempt = result;
+    state.examAnswers = result.answers || state.examAnswers;
+    state.examScreen = 'result';
+  } catch (error) {
+    state.examMessage = getFriendlyError(error, autoSubmitted
+      ? 'O tempo terminou, mas não foi possível enviar. Verifique sua conexão e tente novamente.'
+      : 'Não foi possível enviar a prova.');
+  } finally {
+    state.examSubmitting = false;
+    if (state.currentView === 'exam') renderExamPortal();
+  }
+}
+
+window.updateTeacherExamTitle = value => {
+  state.teacherExamTitle = value;
+};
+
+window.updateTeacherQuestion = (index, field, value) => {
+  if (!state.teacherQuestions[index] || !['prompt', 'answer'].includes(field)) return;
+  state.teacherQuestions[index][field] = value;
+};
+
+window.addTeacherQuestion = () => {
+  state.teacherQuestions.push({ prompt: '', answer: '' });
+  renderTeacherExamCreator();
+  requestAnimationFrame(() => document.querySelector('.question-builder-card:last-child textarea')?.focus());
+};
+
+window.removeTeacherQuestion = index => {
+  if (state.teacherQuestions.length <= 1) return;
+  state.teacherQuestions.splice(index, 1);
+  renderTeacherExamCreator();
+};
+
+window.submitExamCreation = async event => {
+  event.preventDefault();
+  const submitButton = event.currentTarget.querySelector('.confirm-exam-btn');
+  submitButton.disabled = true;
+  submitButton.textContent = 'Criando prova...';
+  state.teacherMessage = '';
+  try {
+    const result = await callExamApi('createExam', {
+      title: state.teacherExamTitle,
+      questions: state.teacherQuestions
+    });
+    state.teacherMessage = `Prova criada com sucesso: ${result.questionCount} questão(ões) publicada(s).`;
+    state.teacherExamTitle = 'Prova de Inglês';
+    state.teacherQuestions = [{ prompt: '', answer: '' }];
+    state.examResultsStatus = 'idle';
+  } catch (error) {
+    state.teacherMessage = getFriendlyError(error, 'Não foi possível criar a prova.');
+  }
+  renderTeacherExamCreator();
+};
+
+window.refreshExamResults = () => {
+  state.examResultsStatus = 'idle';
+  renderTeacherResults();
+};
+
+window.reloadExamPortal = () => {
+  state.examScreen = 'idle';
+  state.examMessage = '';
+  renderExamPortal();
+};
+
+window.continueToExamInstructions = event => {
+  event.preventDefault();
+  const formData = new FormData(event.currentTarget);
+  state.pendingIdentity = {
+    firstName: String(formData.get('firstName') || '').trim(),
+    lastName: String(formData.get('lastName') || '').trim()
+  };
+  state.examMessage = '';
+  state.examScreen = 'instructions';
+  renderExamPortal();
+};
+
+window.backToExamIdentification = () => {
+  state.examScreen = 'identify';
+  state.examMessage = '';
+  renderExamPortal();
+};
+
+window.confirmExamStart = async () => {
+  if (!state.pendingIdentity) return;
+  state.examMessage = '';
+  const identity = state.pendingIdentity;
+  state.examScreen = 'loading';
+  renderExamPortal();
+  try {
+    const data = await callExamApi('startExam', {
+      examId: state.exam.id,
+      firstName: identity.firstName,
+      lastName: identity.lastName
+    });
+    state.exam = data.exam;
+    state.examAttempt = data.attempt;
+    state.examAnswers = data.attempt.answers || [];
+    state.examAutoSubmitAttempted = false;
+    state.examScreen = 'taking';
+  } catch (error) {
+    state.examMessage = getFriendlyError(error, 'Não foi possível iniciar a prova.');
+    state.examScreen = 'instructions';
+  }
+  renderExamPortal();
+};
+
+window.updateStudentExamAnswer = (index, value) => {
+  const question = state.exam?.questions?.[index];
+  if (!question) return;
+  state.examAnswers[index] = { questionId: question.id, value };
+  const status = document.getElementById('exam-save-status');
+  if (status) status.textContent = 'Alterações pendentes...';
+  if (state.examSaveTimer) clearTimeout(state.examSaveTimer);
+  state.examSaveTimer = setTimeout(saveCurrentExamAnswers, 900);
+};
+
+window.submitExamManually = event => {
+  event.preventDefault();
+  if (window.confirm('Deseja enviar a prova agora? Após o envio, as respostas não poderão ser alteradas.')) {
+    submitCurrentExam(false);
+  }
+};
 
 function renderQuiz() {
   const question = getCurrentQuestion();
