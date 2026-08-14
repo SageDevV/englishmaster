@@ -1105,6 +1105,7 @@ function updateHeader() {
     <nav class="app-nav" aria-label="Navegação principal">
       <button class="nav-btn ${state.currentView === 'hub' ? 'active' : ''}" onclick="window.navigateTo('hub')">Hub</button>
       <button class="nav-btn ${isEnglishMasterView() ? 'active' : ''}" onclick="window.navigateTo('english-master')">English Master</button>
+      <a class="nav-btn external-nav-btn" href="https://codeescape-c9e1b.web.app/" target="_blank" rel="noopener noreferrer" aria-label="Abrir CodeScape em uma nova guia">CodeScape <span aria-hidden="true">↗</span></a>
     </nav>
 
     <div class="user-stats">

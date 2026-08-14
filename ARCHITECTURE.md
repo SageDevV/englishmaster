@@ -15,12 +15,16 @@ O antigo aplicativo principal foi preservado como o submódulo **English Master*
 | --- | --- | --- |
 | `#/` | `hub` | Dashboard principal do Magister Hub |
 | `#/english-master` | `english-master` | Submódulo de aprendizagem de inglês |
+| `https://codeescape-c9e1b.web.app/` | externo | CodeScape, escape room de algoritmos, aberto em nova guia |
 | `#/prova` | `exam` | Avaliação do aluno |
 | `#/professor/criacao-de-prova` | `teacher-create` | Criação de avaliações |
 | `#/professor/provas-cadastradas` | `teacher-exams` | Gestão e ativação de provas |
 | `#/professor/resultados` | `teacher-results` | Resultados dos alunos |
 
 As rotas ficam no objeto `viewRoutes`, em `main.js`. `getAuthorizedViewFromHash()` aplica as restrições de professor e aluno.
+
+O CodeScape é um submódulo hospedado externamente. Seu link fica em `updateHeader()` com `target="_blank"` e `rel="noopener noreferrer"`; portanto, não precisa de view em `renderApp()`.
+
 
 ## Renderizadores
 
