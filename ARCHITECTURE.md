@@ -15,6 +15,7 @@ O antigo aplicativo principal foi preservado como o submódulo **English Master*
 | --- | --- | --- |
 | `#/` | `hub` | Dashboard principal do Magister Hub |
 | `#/english-master` | `english-master` | Submódulo de aprendizagem de inglês |
+| `#/cadastro-do-aluno` | `student-registration` | Cadastro global, disponível somente para alunos |
 | `https://codeescape-c9e1b.web.app/` | externo | CodeScape, escape room de algoritmos, aberto em nova guia |
 | `#/prova` | `exam` | Avaliação do aluno |
 | `#/professor/criacao-de-prova` | `teacher-create` | Criação de avaliações |
@@ -30,6 +31,7 @@ O CodeScape é um submódulo hospedado externamente. Seu link fica em `updateHea
 
 - `renderHubHome()`: dashboard e cartões dos módulos disponíveis.
 - `renderHubModuleCard()`: unidade visual reutilizável do menu do Hub.
+- `renderStudentRegistration()`: formulário do perfil global exclusivo do aluno.
 - `renderEnglishMaster()`: página inicial do submódulo English Master.
 - `renderApp()`: resolve a view atual e chama o renderizador correspondente.
 - `updateHeader()`: navegação compartilhada entre Hub, submódulos e ferramentas.
@@ -65,6 +67,28 @@ As duas paletas sobrescrevem as mesmas variáveis sem duplicar os componentes:
 
 Novos componentes devem consumir essas variáveis em vez de cores fixas. Cores semânticas, como erro e sucesso, podem continuar específicas.
 
+## Perfil global do aluno
+
+O cadastro do aluno usa o documento canônico `users/{uid}`, no mesmo projeto Firebase do Hub. Os campos específicos ficam em `studentProfile`:
+
+```js
+{
+  fullName: string,
+  nickname: string,
+  nicknameKey: string,
+  className: 'Entra21' | 'JovemProgramador',
+  courseGoal: string,
+  email: string,
+  completed: true,
+  version: 1,
+  updatedAt: string
+}
+```
+
+O `nickname` e o `nicknameKey` também permanecem no topo de `users/{uid}` para compatibilidade com ranking e jogos. Alterações feitas no formulário global ou no editor legado de nickname mantêm as duas representações sincronizadas. A identificação da prova usa `studentProfile.fullName` como preenchimento inicial, mas continua editável antes do início da tentativa.
+
+Submódulos internos acessam o perfil pelo estado carregado de `users/{uid}`. Um módulo hospedado em outro projeto, como o CodeScape atual, só poderá refletir esse cadastro quando for configurado para autenticar o mesmo usuário e ler o documento canônico no projeto `englishmaster-ea9b9`; não há compartilhamento de sessão ou `localStorage` entre origens diferentes.
+
 ## Compatibilidade
 
-Os dados, Firebase Auth, Firestore, progresso, ranking e avaliações não mudaram de projeto. A refatoração altera apenas a hierarquia de navegação, renderização e identidade visual, permanecendo compatível com o Firebase Spark.
+Os dados, Firebase Auth, Firestore, progresso, ranking e avaliações permanecem no projeto `englishmaster-ea9b9`. O cadastro global usa apenas Auth e Firestore, permanecendo compatível com o Firebase Spark.

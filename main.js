@@ -27,6 +27,12 @@ import {
   validateMultipleChoiceQuestion,
   validateStudentName
 } from './src/services/examServices.js';
+import {
+  isStudentProfileComplete,
+  splitStudentFullName,
+  STUDENT_CLASSES,
+  validateStudentProfile
+} from './src/services/studentProfileServices.js';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -578,6 +584,7 @@ function createDefaultStats() {
   return {
     nickname: '',
     nicknameKey: '',
+    studentProfile: null,
     xp: 0,
     level: 1,
     topicHistory: {},
@@ -627,6 +634,7 @@ const state = {
   examScreen: 'idle',
   examMessage: '',
   pendingIdentity: null,
+  studentProfileMessage: '',
   examSaveTimer: null,
   examSubmitting: false,
   examAutoSubmitAttempted: false,
@@ -684,6 +692,9 @@ function normalizeStats(data = {}) {
     ...data,
     nickname: sanitizeNickname(data.nickname || defaults.nickname),
     nicknameKey: data.nicknameKey || normalizeNicknameKey(data.nickname || defaults.nickname),
+    studentProfile: data.studentProfile && typeof data.studentProfile === 'object'
+      ? { ...data.studentProfile }
+      : defaults.studentProfile,
     level: Math.max(1, Number(data.level || defaults.level)),
     xp: Math.max(0, Number(data.xp || defaults.xp)),
     survivorBest: Math.max(0, Number(data.survivorBest || defaults.survivorBest)),
@@ -811,6 +822,14 @@ async function saveNickname(rawNickname) {
 
     state.userStats.nickname = validation.nickname;
     state.userStats.nicknameKey = validation.nicknameKey;
+    if (state.userStats.studentProfile) {
+      state.userStats.studentProfile = {
+        ...state.userStats.studentProfile,
+        nickname: validation.nickname,
+        nicknameKey: validation.nicknameKey,
+        updatedAt: new Date().toISOString()
+      };
+    }
 
     const saved = await saveProgressToFirestore();
     if (!saved) {
@@ -822,6 +841,47 @@ async function saveNickname(rawNickname) {
   } catch (error) {
     console.error('Erro ao salvar nickname:', error);
     return { ok: false, message: 'Nao foi possivel validar o nickname.' };
+  }
+}
+
+async function saveStudentProfile(rawProfile) {
+  let profile;
+  try {
+    profile = validateStudentProfile(rawProfile);
+  } catch (error) {
+    return { ok: false, message: error.message };
+  }
+
+  try {
+    const available = await isNicknameAvailable(profile.nicknameKey);
+    if (!available) {
+      return { ok: false, message: 'Este nickname já está em uso.' };
+    }
+
+    const previousStats = state.userStats;
+    state.userStats = {
+      ...state.userStats,
+      nickname: profile.nickname,
+      nicknameKey: profile.nicknameKey,
+      studentProfile: {
+        ...profile,
+        completed: true,
+        version: 1,
+        updatedAt: new Date().toISOString()
+      }
+    };
+
+    const saved = await saveProgressToFirestore();
+    if (!saved) {
+      state.userStats = previousStats;
+      return { ok: false, message: 'Não foi possível salvar agora. Tente novamente.' };
+    }
+
+    await loadLeaderboardFromFirestore();
+    return { ok: true };
+  } catch (error) {
+    console.error('Erro ao salvar cadastro do aluno:', error);
+    return { ok: false, message: 'Não foi possível validar ou salvar o cadastro.' };
   }
 }
 
@@ -988,6 +1048,7 @@ function addXP(amount) {
 const viewRoutes = {
   hub: '#/',
   'english-master': '#/english-master',
+  'student-registration': '#/cadastro-do-aluno',
   exam: '#/prova',
   'teacher-create': '#/professor/criacao-de-prova',
   'teacher-exams': '#/professor/provas-cadastradas',
@@ -1002,13 +1063,16 @@ function getAuthorizedViewFromHash() {
     || requestedView === 'teacher-results';
 
   if (teacherOnly && !isAdmin()) return 'hub';
-  if (requestedView === 'exam' && isAdmin()) return 'hub';
+  if ((requestedView === 'exam' || requestedView === 'student-registration') && isAdmin()) return 'hub';
   return requestedView;
 }
 
 window.navigateTo = view => {
   const route = viewRoutes[view] || viewRoutes.hub;
-  if (view === 'exam') state.examScreen = 'idle';
+  if (view === 'exam') {
+    state.examScreen = 'idle';
+    state.pendingIdentity = null;
+  }
   if (view === 'teacher-exams') state.teacherExamsStatus = 'idle';
   if (view === 'teacher-results') state.examResultsStatus = 'idle';
   if (window.location.hash === route) {
@@ -1039,12 +1103,12 @@ function isEnglishMasterView() {
 function applyViewTheme() {
   const englishMasterActive = isEnglishMasterView();
   document.body.dataset.module = englishMasterActive ? 'english-master' : 'hub';
-  document.title = englishMasterActive ? 'English Master | Magister Hub' : 'Magister Hub | Hub do Professor';
+  document.title = englishMasterActive ? 'English Master | Magister Hub' : 'Magister Hub';
   const subtitle = document.querySelector('header > p');
   if (subtitle) {
     subtitle.textContent = englishMasterActive
       ? 'English Master · Aprendizado interativo de inglês'
-      : 'Magister Hub · O hub de ferramentas do professor';
+      : 'Magister Hub · Seu hub de ferramentas educacionais';
   }
 }
 
@@ -1058,6 +1122,7 @@ function renderApp() {
   updateHeader();
   if (state.currentView === 'hub') renderHubHome();
   else if (state.currentView === 'english-master') renderEnglishMaster();
+  else if (state.currentView === 'student-registration' && !isAdmin()) renderStudentRegistration();
   else if (state.currentView === 'quiz') renderQuiz();
   else if (state.currentView === 'exam' && !isAdmin()) renderExamPortal();
   else if (state.currentView === 'teacher-create' && isAdmin()) renderTeacherExamCreator();
@@ -1100,14 +1165,17 @@ function updateHeader() {
 
   const photoURL = state.user.photoURL || '';
   const profileName = escapeHtml(getCurrentProfileName());
-  const accountName = escapeHtml(getAccountDisplayName());
-  const profileHint = state.userStats.nickname ? accountName : 'Sem nickname';
+  const accountName = getAccountDisplayName();
+  const studentProfile = state.userStats.studentProfile;
+  const profileHint = studentProfile?.fullName
+    ? `${studentProfile.fullName}${studentProfile.className ? ` · ${studentProfile.className}` : ''}`
+    : (state.userStats.nickname ? accountName : 'Cadastro pendente');
   const xpPercent = Math.min(100, (state.userStats.xp / XP_PER_LEVEL) * 100);
 
   headerTop.innerHTML = `
     <button class="hub-brand" onclick="window.navigateTo('hub')" aria-label="Ir para o Magister Hub">
       <span class="hub-brand-mark">MH</span>
-      <span class="hub-brand-copy"><strong>Magister Hub</strong><small>Hub do professor</small></span>
+      <span class="hub-brand-copy"><strong>Magister Hub</strong><small>${isAdmin() ? 'Hub do professor' : 'Hub do aluno'}</small></span>
     </button>
 
     <div class="user-profile">
@@ -1116,7 +1184,9 @@ function updateHeader() {
         <div class="profile-display-name">${profileName}</div>
         <div class="profile-subtitle">${escapeHtml(profileHint)}</div>
         <div class="profile-actions">
-          <button class="profile-action-btn" onclick="window.openNicknameModal()">Editar nick</button>
+          ${isAdmin()
+            ? '<button class="profile-action-btn" onclick="window.openNicknameModal()">Editar nick</button>'
+            : '<button class="profile-action-btn" onclick="window.navigateTo(\'student-registration\')">Cadastro</button>'}
           <button class="logout-btn" onclick="window.logout()">Sair</button>
         </div>
       </div>
@@ -1180,6 +1250,15 @@ function renderHubHome() {
       }
     ] : [
       {
+        view: 'student-registration',
+        icon: '◉',
+        kicker: 'Perfil global',
+        title: 'Cadastro do aluno',
+        description: isStudentProfileComplete(state.userStats.studentProfile)
+          ? 'Cadastro completo. Revise seus dados compartilhados entre os submódulos.'
+          : 'Preencha seus dados para usá-los em todos os submódulos do Magister Hub.'
+      },
+      {
         view: 'exam',
         icon: state.examScreen === 'locked' ? '🔒' : '✓',
         kicker: 'Avaliação',
@@ -1213,6 +1292,72 @@ function renderHubHome() {
         <small>${modules.length} ${modules.length === 1 ? 'módulo' : 'módulos'}</small>
       </div>
       <div class="hub-modules-grid">${modules.map(renderHubModuleCard).join('')}</div>
+    </section>
+  `;
+}
+
+function renderStudentRegistration() {
+  state.currentView = 'student-registration';
+  const mainContent = document.getElementById('main-content');
+  const profile = state.userStats.studentProfile || {};
+  const fullName = profile.fullName || state.user?.displayName || '';
+  const nickname = profile.nickname || state.userStats.nickname || '';
+  const email = profile.email || state.user?.email || '';
+  const isComplete = isStudentProfileComplete(profile);
+  const messageType = state.studentProfileMessage.startsWith('Cadastro salvo') ? 'success' : 'error';
+
+  mainContent.innerHTML = `
+    <section class="student-registration-page">
+      <div class="student-registration-heading">
+        <div>
+          <span class="hub-eyebrow">MAGISTER HUB / PERFIL GLOBAL</span>
+          <h1>Cadastro do aluno</h1>
+          <p>Estes dados ficam vinculados à sua conta e podem ser utilizados por todos os submódulos conectados ao Magister Hub.</p>
+        </div>
+        <button class="module-back-btn" type="button" onclick="window.navigateTo('hub')">← Voltar ao Hub</button>
+      </div>
+
+      <div class="student-registration-layout">
+        <aside class="global-profile-notice">
+          <span class="global-profile-icon" aria-hidden="true">◎</span>
+          <div>
+            <strong>Perfil compartilhado</strong>
+            <p>Nome, nickname, turma, objetivo e e-mail são salvos em um único cadastro no Firebase.</p>
+          </div>
+          <span class="profile-completion-badge ${isComplete ? 'complete' : ''}">${isComplete ? 'Cadastro completo' : 'Cadastro pendente'}</span>
+        </aside>
+
+        <form class="student-registration-form" onsubmit="window.submitStudentRegistration(event)">
+          <label class="exam-field">
+            <span>Nome do aluno</span>
+            <input name="fullName" type="text" minlength="3" maxlength="120" required autocomplete="name" value="${escapeHtml(fullName)}" placeholder="Nome e sobrenome" />
+          </label>
+          <label class="exam-field">
+            <span>Nickname</span>
+            <input name="nickname" type="text" minlength="3" maxlength="20" required autocomplete="off" value="${escapeHtml(nickname)}" placeholder="Como deseja ser chamado" />
+          </label>
+          <label class="exam-field">
+            <span>Turma</span>
+            <select name="className" required>
+              <option value="">Selecione sua turma</option>
+              ${STUDENT_CLASSES.map(className => `<option value="${className}" ${profile.className === className ? 'selected' : ''}>${className}</option>`).join('')}
+            </select>
+          </label>
+          <label class="exam-field">
+            <span>E-mail</span>
+            <input name="email" type="email" maxlength="254" required autocomplete="email" value="${escapeHtml(email)}" placeholder="aluno@email.com" />
+          </label>
+          <label class="exam-field student-goal-field">
+            <span>Objetivo com o curso</span>
+            <textarea name="courseGoal" minlength="10" maxlength="1000" rows="5" required placeholder="Conte o que você deseja alcançar com o curso">${escapeHtml(profile.courseGoal || '')}</textarea>
+          </label>
+          ${state.studentProfileMessage ? `<div class="exam-alert ${messageType}" role="status">${escapeHtml(state.studentProfileMessage)}</div>` : ''}
+          <div class="student-registration-actions">
+            <button class="secondary-btn" type="button" onclick="window.navigateTo('hub')">Cancelar</button>
+            <button class="next-btn" type="submit">Salvar cadastro</button>
+          </div>
+        </form>
+      </div>
     </section>
   `;
 }
@@ -1700,6 +1845,8 @@ function renderExamPortal() {
     return;
   }
 
+  const profileIdentity = splitStudentFullName(state.userStats.studentProfile?.fullName || '');
+  const identity = state.pendingIdentity || profileIdentity;
   mainContent.innerHTML = `
     <section class="exam-page identification-page">
       <div class="exam-card identification-card">
@@ -1707,8 +1854,8 @@ function renderExamPortal() {
         <h2>Identificação do aluno</h2>
         <p class="identity-warning">Insira seu nome e sobrenome verdadeiros. Não utilize nicknames.</p>
         <form class="identity-form" onsubmit="window.continueToExamInstructions(event)">
-          <label class="exam-field"><span>Nome</span><input name="firstName" type="text" minlength="2" maxlength="80" required autocomplete="given-name" /></label>
-          <label class="exam-field"><span>Sobrenome</span><input name="lastName" type="text" minlength="2" maxlength="80" required autocomplete="family-name" /></label>
+          <label class="exam-field"><span>Nome</span><input name="firstName" type="text" minlength="2" maxlength="80" required autocomplete="given-name" value="${escapeHtml(identity.firstName || '')}" /></label>
+          <label class="exam-field"><span>Sobrenome</span><input name="lastName" type="text" minlength="2" maxlength="80" required autocomplete="family-name" value="${escapeHtml(identity.lastName || '')}" /></label>
           <button class="next-btn" type="submit">Continuar</button>
         </form>
       </div>
@@ -2170,6 +2317,32 @@ window.refreshExamResults = () => {
   state.examResultsMessage = '';
   state.examResultsStatus = 'idle';
   renderTeacherResults();
+};
+
+window.submitStudentRegistration = async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submitButton = form.querySelector('button[type="submit"]');
+  const formData = new FormData(form);
+  const rawProfile = {
+    fullName: formData.get('fullName'),
+    nickname: formData.get('nickname'),
+    className: formData.get('className'),
+    courseGoal: formData.get('courseGoal'),
+    email: formData.get('email')
+  };
+
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.textContent = 'Salvando...';
+  }
+
+  const result = await saveStudentProfile(rawProfile);
+  state.studentProfileMessage = result.ok
+    ? 'Cadastro salvo com sucesso. Seu perfil global já está disponível nos submódulos.'
+    : result.message;
+  updateHeader();
+  renderStudentRegistration();
 };
 
 window.reloadExamPortal = () => {

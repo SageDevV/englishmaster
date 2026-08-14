@@ -2643,3 +2643,169 @@ body[data-module="english-master"] .survivor-mode {
   border-color: rgba(248, 113, 113, 0.7);
   background: rgba(239, 68, 68, 0.18);
 }
+
+
+
+/* --- Global Student Registration --- */
+.student-registration-page {
+  display: grid;
+  gap: 1.5rem;
+  animation: fadeIn 0.3s ease-out;
+}
+
+.student-registration-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: clamp(1.25rem, 4vw, 2rem);
+  border: 1px solid rgba(196, 181, 253, 0.18);
+  border-radius: 1.1rem;
+  background: linear-gradient(120deg, rgba(109, 40, 217, 0.22), rgba(17, 8, 31, 0.76));
+}
+
+.student-registration-heading h1 {
+  margin: 0.35rem 0 0.55rem;
+  font-size: clamp(2rem, 5vw, 3.25rem);
+}
+
+.student-registration-heading p {
+  max-width: 720px;
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.student-registration-layout {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.42fr) minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+}
+
+.global-profile-notice,
+.student-registration-form {
+  border: 1px solid var(--glass-border);
+  border-radius: 1rem;
+  background: rgba(10, 10, 10, 0.82);
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.2);
+}
+
+.global-profile-notice {
+  display: grid;
+  gap: 1rem;
+  padding: 1.35rem;
+}
+
+.global-profile-icon {
+  display: grid;
+  place-items: center;
+  width: 52px;
+  height: 52px;
+  border: 1px solid rgba(196, 181, 253, 0.25);
+  border-radius: 15px;
+  color: #ddd6fe;
+  background: rgba(139, 92, 246, 0.12);
+  font-size: 1.65rem;
+}
+
+.global-profile-notice strong {
+  font-size: 1.1rem;
+}
+
+.global-profile-notice p {
+  margin-top: 0.4rem;
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  line-height: 1.55;
+}
+
+.profile-completion-badge {
+  justify-self: start;
+  padding: 0.42rem 0.65rem;
+  border-radius: 999px;
+  color: #fde68a;
+  background: rgba(245, 158, 11, 0.12);
+  font-size: 0.75rem;
+  font-weight: 900;
+}
+
+.profile-completion-badge.complete {
+  color: #a7f3d0;
+  background: rgba(16, 185, 129, 0.13);
+}
+
+.student-registration-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  padding: clamp(1.25rem, 4vw, 2rem);
+}
+
+.exam-field select {
+  width: 100%;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 0.65rem;
+  outline: none;
+  background: #17111f;
+  color: var(--text-main);
+  font: inherit;
+  line-height: 1.5;
+  padding: 0.85rem 0.95rem;
+  transition: 0.2s ease;
+}
+
+.exam-field select:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+}
+
+.student-goal-field,
+.student-registration-form > .exam-alert,
+.student-registration-actions {
+  grid-column: 1 / -1;
+}
+
+.student-registration-form > .exam-alert {
+  margin-top: 0;
+}
+
+.student-registration-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.75rem;
+}
+
+.student-registration-actions button {
+  min-width: 145px;
+}
+
+@media (max-width: 820px) {
+  .student-registration-layout {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .student-registration-heading {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .student-registration-form {
+    grid-template-columns: 1fr;
+  }
+
+  .student-goal-field,
+  .student-registration-form > .exam-alert,
+  .student-registration-actions {
+    grid-column: auto;
+  }
+
+  .student-registration-actions {
+    flex-direction: column-reverse;
+  }
+
+  .student-registration-actions button {
+    width: 100%;
+  }
+}
