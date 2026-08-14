@@ -3375,3 +3375,141 @@ body[data-module="english-master"] .survivor-mode {
     grid-template-columns: 1fr;
   }
 }
+
+
+
+/* --- Control sizing and alignment normalization --- */
+:root {
+  --control-height: 3rem;
+  --control-height-emphasis: 3.25rem;
+  --control-height-compact: 2.5rem;
+  --control-radius: 0.65rem;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
+.exam-field input,
+.exam-field select,
+.alternative-editor-row > input {
+  min-width: 0;
+  height: var(--control-height);
+  min-height: var(--control-height);
+  padding-block: 0.65rem;
+}
+
+.exam-field textarea {
+  min-width: 0;
+  min-height: 6.5rem;
+  padding-block: 0.7rem;
+}
+
+.next-btn,
+.secondary-btn,
+.add-question-btn,
+.remove-question-btn,
+.publish-exam-btn,
+.deactivate-exam-btn,
+.delete-exam-btn,
+.module-back-btn,
+.student-registration-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.next-btn {
+  min-height: var(--control-height-emphasis);
+  padding: 0.85rem 1.15rem;
+  border-radius: var(--control-radius);
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 900;
+}
+
+.academic-inline-form .next-btn {
+  min-height: var(--control-height);
+  padding: 0.7rem 1rem;
+  font-size: 0.95rem;
+}
+
+.secondary-btn,
+.publish-exam-btn,
+.deactivate-exam-btn,
+.delete-exam-btn,
+.module-back-btn,
+.student-registration-actions button {
+  min-height: 2.75rem;
+}
+
+.archive-academic-btn,
+.reference-actions button,
+.delete-result-log-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: var(--control-height-compact);
+  line-height: 1.2;
+  text-align: center;
+}
+
+.alternative-editor-row {
+  grid-template-columns: 42px minmax(0, 1fr) 40px;
+}
+
+.remove-alternative-btn {
+  width: 40px;
+  height: 40px;
+}
+
+.academic-inline-form > *,
+.reference-builder > *,
+.exam-audience-fields > *,
+.subject-registration-form > *,
+.student-registration-form > *,
+.registered-exam-actions > * {
+  min-width: 0;
+}
+
+.registered-exam-actions {
+  max-width: 100%;
+}
+
+button:focus-visible,
+a.nav-btn:focus-visible,
+.exam-field input:focus-visible,
+.exam-field select:focus-visible,
+.exam-field textarea:focus-visible,
+.alternative-editor-row > input:focus-visible,
+.written-answer-input:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--secondary) 85%, white 15%);
+  outline-offset: 2px;
+}
+
+@media (max-width: 640px) {
+  .archive-academic-btn,
+  .reference-actions button,
+  .delete-result-log-btn {
+    min-height: 2.75rem;
+  }
+
+  .alternative-editor-row {
+    grid-template-columns: 44px minmax(0, 1fr) 44px;
+  }
+
+  .remove-alternative-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .registered-exam-actions {
+    justify-content: flex-start;
+  }
+}
