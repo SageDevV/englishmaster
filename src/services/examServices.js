@@ -5,6 +5,39 @@ export const EXAM_QUESTION_TYPES = Object.freeze({
 
 export const MAX_ZIP_FILE_SIZE_BYTES = 5 * 1024 * 1024;
 export const ATTACHMENT_CHUNK_SIZE_BYTES = 640 * 1024;
+export const DEFAULT_EXAM_DURATION_MINUTES = 120;
+export const MIN_EXAM_DURATION_MINUTES = 1;
+export const MAX_EXAM_DURATION_MINUTES = 720;
+export const DEFAULT_EXAM_DURATION_SECONDS = DEFAULT_EXAM_DURATION_MINUTES * 60;
+
+export function validateExamDurationMinutes(value) {
+  const minutes = Number(value);
+  if (!Number.isInteger(minutes)
+    || minutes < MIN_EXAM_DURATION_MINUTES
+    || minutes > MAX_EXAM_DURATION_MINUTES) {
+    throw new Error(`O tempo da prova deve ser um número inteiro entre ${MIN_EXAM_DURATION_MINUTES} e ${MAX_EXAM_DURATION_MINUTES} minutos.`);
+  }
+  return minutes * 60;
+}
+
+export function getExamDurationSeconds(value) {
+  const seconds = Number(value);
+  const minimumSeconds = MIN_EXAM_DURATION_MINUTES * 60;
+  const maximumSeconds = MAX_EXAM_DURATION_MINUTES * 60;
+  return Number.isInteger(seconds) && seconds >= minimumSeconds && seconds <= maximumSeconds
+    ? seconds
+    : DEFAULT_EXAM_DURATION_SECONDS;
+}
+
+export function formatExamDurationLabel(value) {
+  const totalMinutes = Math.ceil(getExamDurationSeconds(value) / 60);
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  const parts = [];
+  if (hours) parts.push(`${hours} ${hours === 1 ? 'hora' : 'horas'}`);
+  if (minutes) parts.push(`${minutes} ${minutes === 1 ? 'minuto' : 'minutos'}`);
+  return parts.join(' e ');
+}
 
 export function normalizeExamAnswer(value) {
   return String(value ?? '')

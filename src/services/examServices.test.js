@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import {
   ATTACHMENT_CHUNK_SIZE_BYTES,
   calculateExamElapsedSeconds,
+  DEFAULT_EXAM_DURATION_MINUTES,
+  DEFAULT_EXAM_DURATION_SECONDS,
   EXAM_QUESTION_TYPES,
+  formatExamDurationLabel,
+  getExamDurationSeconds,
   getExamQuestionType,
   gradeExamAnswers,
   hasZipFileSignature,
@@ -12,6 +16,7 @@ import {
   normalizeExamAnswer,
   sanitizeExamAnswers,
   splitAttachmentBytes,
+  validateExamDurationMinutes,
   validateMultipleChoiceQuestion,
   validateStudentName,
   validateZipAttachmentQuestion,
@@ -21,6 +26,18 @@ import {
 assert.equal(normalizeExamAnswer('  AÇÃO   Correta  '), 'acao correta');
 assert.equal(validateStudentName('  Ana  Maria ', 'Nome'), 'Ana Maria');
 assert.throws(() => validateStudentName('A', 'Nome'), /entre 2 e 80/);
+assert.equal(validateExamDurationMinutes(45), 2_700);
+assert.equal(validateExamDurationMinutes(String(DEFAULT_EXAM_DURATION_MINUTES)), DEFAULT_EXAM_DURATION_SECONDS);
+assert.throws(() => validateExamDurationMinutes(0), /entre 1 e 720 minutos/);
+assert.throws(() => validateExamDurationMinutes(721), /entre 1 e 720 minutos/);
+assert.throws(() => validateExamDurationMinutes(1.5), /número inteiro/);
+assert.equal(getExamDurationSeconds(undefined), DEFAULT_EXAM_DURATION_SECONDS);
+assert.equal(getExamDurationSeconds(3_600), 3_600);
+assert.equal(getExamDurationSeconds(59), DEFAULT_EXAM_DURATION_SECONDS);
+assert.equal(formatExamDurationLabel(60), '1 minuto');
+assert.equal(formatExamDurationLabel(3_600), '1 hora');
+assert.equal(formatExamDurationLabel(5_400), '1 hora e 30 minutos');
+assert.equal(formatExamDurationLabel(undefined), '2 horas');
 assert.equal(getExamQuestionType({}), EXAM_QUESTION_TYPES.MULTIPLE_CHOICE);
 assert.equal(getExamQuestionType({ type: 'zip_attachment' }), EXAM_QUESTION_TYPES.ZIP_ATTACHMENT);
 

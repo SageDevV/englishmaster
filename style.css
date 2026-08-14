@@ -3226,11 +3226,21 @@ body[data-module="english-master"] .survivor-mode {
   color: #fff;
 }
 
+.exam-settings-fields,
 .exam-audience-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 1rem;
+}
+
+.exam-audience-fields {
   margin-top: 1rem;
+}
+
+.exam-duration-field small {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.5;
 }
 
 .exam-academic-meta {
@@ -3258,6 +3268,7 @@ body[data-module="english-master"] .survivor-mode {
 @media (max-width: 640px) {
   .academic-inline-form,
   .reference-builder,
+  .exam-settings-fields,
   .exam-audience-fields {
     grid-template-columns: 1fr;
   }

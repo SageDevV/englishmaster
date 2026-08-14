@@ -22,15 +22,21 @@ import {
 import {
   ATTACHMENT_CHUNK_SIZE_BYTES,
   calculateExamElapsedSeconds,
+  DEFAULT_EXAM_DURATION_MINUTES,
+  formatExamDurationLabel,
+  getExamDurationSeconds,
   EXAM_QUESTION_TYPES,
   getExamQuestionType,
   gradeExamAnswers,
   hasZipFileSignature,
   hashAttachmentBytes,
   hashExamAnswer,
+  MAX_EXAM_DURATION_MINUTES,
   MAX_ZIP_FILE_SIZE_BYTES,
+  MIN_EXAM_DURATION_MINUTES,
   sanitizeExamAnswers,
   splitAttachmentBytes,
+  validateExamDurationMinutes,
   validateMultipleChoiceQuestion,
   validateStudentName,
   validateZipAttachmentQuestion,
@@ -78,7 +84,6 @@ const auth = firebase.auth();
 const db = firebase.firestore();
 
 const ADMIN_EMAIL = 'pandredbz@gmail.com';
-const EXAM_DURATION_SECONDS = 2 * 60 * 60;
 
 function isAdmin() {
   return String(state.user?.email || '').trim().toLowerCase() === ADMIN_EMAIL;
@@ -367,7 +372,7 @@ function serializeExamDocument(doc) {
     className: data.className || '',
     subjectId: data.subjectId || '',
     subjectName: data.subjectName || '',
-    durationSeconds: data.durationSeconds,
+    durationSeconds: getExamDurationSeconds(data.durationSeconds),
     questionCount: data.questionCount,
     questions: data.questions || [],
     gradingSalt: data.gradingSalt,
@@ -378,12 +383,20 @@ function serializeExamDocument(doc) {
   };
 }
 
+function getAttemptDurationSeconds(data = {}) {
+  return getExamDurationSeconds(data.examSnapshot?.durationSeconds ?? data.durationSeconds);
+}
+
 function getAttemptExam(data, fallbackExam) {
-  if (!data.examSnapshot?.questions || !data.examSnapshot?.gradingSalt) return fallbackExam;
+  const durationSeconds = getAttemptDurationSeconds(data);
+  if (!data.examSnapshot?.questions || !data.examSnapshot?.gradingSalt) {
+    return { ...fallbackExam, durationSeconds };
+  }
   return {
     ...fallbackExam,
     id: data.examId,
     title: data.examSnapshot.title || data.examTitle,
+    durationSeconds,
     questionCount: data.examSnapshot.questions.length,
     questions: data.examSnapshot.questions,
     gradingSalt: data.examSnapshot.gradingSalt
@@ -392,6 +405,7 @@ function getAttemptExam(data, fallbackExam) {
 
 async function serializeAttemptData(data, fallbackExam) {
   const exam = getAttemptExam(data, fallbackExam);
+  const durationSeconds = getAttemptDurationSeconds(data);
   const startedAtMillis = timestampToMillis(data.startedAt);
   const result = {
     status: data.status,
@@ -399,13 +413,13 @@ async function serializeAttemptData(data, fallbackExam) {
     lastName: data.lastName,
     answers: data.answers || [],
     startedAtMillis,
-    endsAtMillis: startedAtMillis + EXAM_DURATION_SECONDS * 1000,
+    endsAtMillis: startedAtMillis + durationSeconds * 1000,
     submittedAtMillis: timestampToMillis(data.submittedAt),
     elapsedSeconds: data.submittedAt
       ? calculateExamElapsedSeconds(
           timestampToMillis(data.startedAt),
           timestampToMillis(data.submittedAt),
-          EXAM_DURATION_SECONDS
+          durationSeconds
         )
       : null
   };
@@ -502,7 +516,7 @@ async function loadAttemptAttachments(exam, answers = [], userId = state.user?.u
 
 function attemptIsStillRunning(attempt) {
   return attempt.status === 'in_progress'
-    && Date.now() < timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
+    && Date.now() < timestampToMillis(attempt.startedAt) + getAttemptDurationSeconds(attempt) * 1000;
 }
 
 async function getExamsWithRunningAttempts() {
@@ -542,6 +556,7 @@ async function createExamOnFreeTier(data) {
   const title = String(data.title || 'Prova de Inglês').trim().slice(0, 120);
   if (!title) throw new Error('Informe o título da prova.');
   const audience = validateAcademicSelection(data, state.academicClasses, state.academicSubjects);
+  const durationSeconds = validateExamDurationMinutes(data.durationMinutes);
   if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Adicione pelo menos uma pergunta à prova.');
 
   const gradingSalt = createExamSalt();
@@ -570,7 +585,7 @@ async function createExamOnFreeTier(data) {
     ...audience,
     active: true,
     deleted: false,
-    durationSeconds: EXAM_DURATION_SECONDS,
+    durationSeconds,
     questionCount: questions.length,
     questions,
     gradingSalt,
@@ -621,6 +636,7 @@ async function updateExamOnFreeTier(data) {
   const title = String(data.title || '').trim().slice(0, 120);
   if (!title) throw new Error('Informe o título da prova.');
   const audience = validateAcademicSelection(data, state.academicClasses, state.academicSubjects);
+  const durationSeconds = validateExamDurationMinutes(data.durationMinutes);
   if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Mantenha pelo menos uma pergunta na prova.');
   const existingById = new Map(existing.questions.map(question => [question.id, question]));
   const questions = await Promise.all(data.questions.map((item, index) => {
@@ -642,7 +658,7 @@ async function updateExamOnFreeTier(data) {
       ...audience,
       active: existing.active,
       deleted: false,
-      durationSeconds: existing.durationSeconds || EXAM_DURATION_SECONDS,
+      durationSeconds,
       questionCount: questions.length,
       questions,
       gradingSalt: existing.gradingSalt,
@@ -666,6 +682,7 @@ async function updateExamOnFreeTier(data) {
   await examRef.update({
     title,
     ...audience,
+    durationSeconds,
     questions,
     questionCount: questions.length,
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -759,7 +776,7 @@ async function getExamStateOnFreeTier(data = {}) {
   const attemptDoc = await attemptRef.get();
   if (!attemptDoc.exists) return { exam, attempt: null };
   const rawAttempt = attemptDoc.data();
-  const deadlineMillis = timestampToMillis(rawAttempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
+  const deadlineMillis = timestampToMillis(rawAttempt.startedAt) + getAttemptDurationSeconds(rawAttempt) * 1000;
   if (rawAttempt.status === 'in_progress' && Date.now() >= deadlineMillis) {
     return { exam, attempt: await submitExamOnFreeTier({ examId: exam.id }) };
   }
@@ -790,8 +807,10 @@ async function startExamOnFreeTier(data) {
       lastName,
       status: 'in_progress',
       startedAt: serverTimestamp,
+      durationSeconds: publicExam.durationSeconds,
       examSnapshot: {
         title: publicExam.title,
+        durationSeconds: publicExam.durationSeconds,
         questions: publicExam.questions,
         gradingSalt: publicExam.gradingSalt
       },
@@ -815,7 +834,7 @@ async function saveExamAnswersOnFreeTier(data) {
     if (!examDoc.exists || !attemptDoc.exists) throw new Error('Tentativa não encontrada.');
     const attempt = attemptDoc.data();
     if (attempt.status !== 'in_progress') throw new Error('Esta prova já foi enviada.');
-    const deadlineMillis = timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
+    const deadlineMillis = timestampToMillis(attempt.startedAt) + getAttemptDurationSeconds(attempt) * 1000;
     if (Date.now() >= deadlineMillis) throw new Error('O tempo da prova terminou.');
     const attemptQuestions = attempt.examSnapshot?.questions || examDoc.data().questions || [];
     transaction.update(attemptRef, {
@@ -839,7 +858,7 @@ async function submitExamOnFreeTier(data) {
     if (attempt.status === 'submitted') return publicExam;
 
     const attemptExam = getAttemptExam(attempt, publicExam);
-    const deadlineMillis = timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
+    const deadlineMillis = timestampToMillis(attempt.startedAt) + getAttemptDurationSeconds(attempt) * 1000;
     const isPastDeadline = Date.now() >= deadlineMillis;
     const answers = sanitizeExamAnswers(
       isPastDeadline || data.answers === undefined ? attempt.answers : data.answers,
@@ -1098,6 +1117,7 @@ const state = {
   examSubmitting: false,
   examAutoSubmitAttempted: false,
   teacherExamTitle: 'Prova de Inglês',
+  teacherExamDurationMinutes: DEFAULT_EXAM_DURATION_MINUTES,
   teacherExamClassId: 'entra21',
   teacherExamSubjectId: '',
   teacherQuestions: [createMultipleChoiceDraft()],
@@ -1118,6 +1138,7 @@ const state = {
   teacherExamsMessage: '',
   editingExamId: null,
   editingExamTitle: '',
+  editingExamDurationMinutes: DEFAULT_EXAM_DURATION_MINUTES,
   editingExamClassId: '',
   editingExamSubjectId: '',
   editingExamQuestions: []
@@ -2343,11 +2364,19 @@ function renderTeacherExamCreator() {
       </div>
 
       <form class="exam-builder" onsubmit="window.submitExamCreation(event)">
-        <label class="exam-field">
-          <span>Título da prova</span>
-          <input type="text" maxlength="120" required value="${escapeHtml(state.teacherExamTitle)}"
-            oninput="window.updateTeacherExamTitle(this.value)" placeholder="Ex.: Avaliação de Inglês - Unidade 1" />
-        </label>
+        <div class="exam-settings-fields">
+          <label class="exam-field">
+            <span>Título da prova</span>
+            <input type="text" maxlength="120" required value="${escapeHtml(state.teacherExamTitle)}"
+              oninput="window.updateTeacherExamTitle(this.value)" placeholder="Ex.: Avaliação de Inglês - Unidade 1" />
+          </label>
+          <label class="exam-field exam-duration-field">
+            <span>Tempo da prova (minutos)</span>
+            <input type="number" min="${MIN_EXAM_DURATION_MINUTES}" max="${MAX_EXAM_DURATION_MINUTES}" step="1" required
+              value="${escapeHtml(state.teacherExamDurationMinutes)}" oninput="window.updateTeacherExamDuration(this.value)" />
+            <small>De ${MIN_EXAM_DURATION_MINUTES} a ${MAX_EXAM_DURATION_MINUTES} minutos. O cronômetro inicia após a confirmação do aluno.</small>
+          </label>
+        </div>
         <div class="exam-audience-fields">
           <label class="exam-field"><span>Turma</span><select required onchange="window.updateTeacherExamAudience('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.teacherExamClassId, 'Selecione a turma')}</select></label>
           <label class="exam-field"><span>Matéria</span><select required onchange="window.updateTeacherExamAudience('subjectId', this.value)">${renderAcademicOptions(examSubjects, state.teacherExamSubjectId, 'Selecione a matéria')}</select></label>
@@ -2414,7 +2443,7 @@ function renderTeacherExamManager() {
                   <span class="registered-exam-date">${formatExamDate(exam.updatedAtMillis || exam.createdAtMillis)}</span>
                 </div>
                 <h3>${escapeHtml(exam.title)}</h3>
-                <p>${exam.questionCount} ${exam.questionCount === 1 ? 'questão cadastrada' : 'questões cadastradas'}</p>
+                <p>${exam.questionCount} ${exam.questionCount === 1 ? 'questão cadastrada' : 'questões cadastradas'} · ${formatExamDurationLabel(exam.durationSeconds)}</p>
                 <div class="exam-academic-meta"><span>${escapeHtml(exam.className || 'Todas as turmas')}</span><span>${escapeHtml(exam.subjectName || 'Matéria não informada')}</span></div>
                 <div class="registered-exam-actions">
                   <button class="secondary-btn" onclick="window.startEditingExam('${exam.id}')">Editar</button>
@@ -2450,7 +2479,15 @@ function renderTeacherExamEditor(mainContent) {
         <button class="secondary-btn" onclick="window.cancelExamEditing()">Cancelar edição</button>
       </div>
       <form class="exam-builder" onsubmit="window.submitExamUpdate(event)">
-        <label class="exam-field"><span>Título da prova</span><input type="text" maxlength="120" required value="${escapeHtml(state.editingExamTitle)}" oninput="window.updateEditingExamTitle(this.value)" /></label>
+        <div class="exam-settings-fields">
+          <label class="exam-field"><span>Título da prova</span><input type="text" maxlength="120" required value="${escapeHtml(state.editingExamTitle)}" oninput="window.updateEditingExamTitle(this.value)" /></label>
+          <label class="exam-field exam-duration-field">
+            <span>Tempo da prova (minutos)</span>
+            <input type="number" min="${MIN_EXAM_DURATION_MINUTES}" max="${MAX_EXAM_DURATION_MINUTES}" step="1" required
+              value="${escapeHtml(state.editingExamDurationMinutes)}" oninput="window.updateEditingExamDuration(this.value)" />
+            <small>Alterações não afetam tentativas que já foram iniciadas.</small>
+          </label>
+        </div>
         <div class="exam-audience-fields">
           <label class="exam-field"><span>Turma</span><select required onchange="window.updateEditingExamAudience('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.editingExamClassId, 'Selecione a turma')}</select></label>
           <label class="exam-field"><span>Matéria</span><select required onchange="window.updateEditingExamAudience('subjectId', this.value)">${renderAcademicOptions(editingSubjects, state.editingExamSubjectId, 'Selecione a matéria')}</select></label>
@@ -2700,7 +2737,7 @@ function renderStudentExamCatalog(mainContent) {
               <article class="student-exam-catalog-card ${exam.active ? 'active' : 'locked'}">
                 <div class="registered-exam-topline"><span class="exam-status-badge ${exam.active ? 'active' : 'inactive'}">${exam.active ? '✓' : '🔒'} ${status}</span><span class="registered-exam-date">${formatExamDate(exam.updatedAtMillis || exam.createdAtMillis)}</span></div>
                 <h3>${escapeHtml(exam.title)}</h3>
-                <p>${exam.questionCount} ${exam.questionCount === 1 ? 'questão' : 'questões'} · ${escapeHtml(exam.subjectName || 'Matéria')}</p>
+                <p>${exam.questionCount} ${exam.questionCount === 1 ? 'questão' : 'questões'} · ${formatExamDurationLabel(exam.durationSeconds)} · ${escapeHtml(exam.subjectName || 'Matéria')}</p>
                 <div class="exam-academic-meta"><span>${escapeHtml(exam.className || profile.className)}</span><span>${escapeHtml(exam.subjectName || 'Matéria não informada')}</span></div>
                 ${canOpen
                   ? `<button class="next-btn" onclick="window.openStudentExam('${exam.id}')">${action}</button>`
@@ -2760,7 +2797,7 @@ function renderExamPortal() {
           <span class="eyebrow">Avaliação bloqueada</span>
           <h2>${escapeHtml(state.exam.title)}</h2>
           <p>Esta prova está cadastrada, mas ainda não foi ativada pelo professor.</p>
-          <div class="locked-exam-info"><span>${state.exam.questionCount} ${state.exam.questionCount === 1 ? 'questão' : 'questões'}</span><span>Tempo previsto: 2 horas</span></div>
+          <div class="locked-exam-info"><span>${state.exam.questionCount} ${state.exam.questionCount === 1 ? 'questão' : 'questões'}</span><span>Tempo previsto: ${formatExamDurationLabel(state.exam.durationSeconds)}</span></div>
           <div class="exam-alert locked" role="status">Aguarde o professor liberar a avaliação. Enquanto estiver bloqueada, nenhuma tentativa poderá ser iniciada.</div>
         </div>
       </section>
@@ -2813,7 +2850,7 @@ function renderExamInstructions(mainContent) {
           </div>
         </div>
         <ul class="exam-rules">
-          <li>Você terá <strong>2 horas</strong> a partir da confirmação.</li>
+          <li>Você terá <strong>${formatExamDurationLabel(state.exam.durationSeconds)}</strong> a partir da confirmação.</li>
           <li>A tentativa é <strong>única</strong> e não poderá ser reiniciada.</li>
           <li>Ao zerar o cronômetro, as respostas preenchidas serão enviadas automaticamente.</li>
           <li>Confira seu nome: <strong>${escapeHtml(`${identity.firstName || ''} ${identity.lastName || ''}`)}</strong>.</li>
@@ -3209,6 +3246,10 @@ window.updateTeacherExamTitle = value => {
   state.teacherExamTitle = value;
 };
 
+window.updateTeacherExamDuration = value => {
+  state.teacherExamDurationMinutes = value;
+};
+
 window.updateTeacherExamAudience = (field, value) => {
   if (field === 'classId') {
     state.teacherExamClassId = value;
@@ -3290,12 +3331,14 @@ window.submitExamCreation = async event => {
     state.teacherExamSubjectId = subjectId;
     const result = await callExamApi('createExam', {
       title: state.teacherExamTitle,
+      durationMinutes: state.teacherExamDurationMinutes,
       classId: state.teacherExamClassId,
       subjectId,
       questions: state.teacherQuestions
     });
     state.teacherMessage = `Prova criada com sucesso: ${result.questionCount} questão(ões) publicada(s).`;
     state.teacherExamTitle = 'Prova de Inglês';
+    state.teacherExamDurationMinutes = DEFAULT_EXAM_DURATION_MINUTES;
     state.teacherExamClassId = 'entra21';
     state.teacherExamSubjectId = '';
     state.teacherQuestions = [createMultipleChoiceDraft()];
@@ -3348,6 +3391,7 @@ window.startEditingExam = async examId => {
   }));
   state.editingExamId = exam.id;
   state.editingExamTitle = exam.title;
+  state.editingExamDurationMinutes = Math.ceil(getExamDurationSeconds(exam.durationSeconds) / 60);
   state.editingExamClassId = exam.classId || 'entra21';
   state.editingExamSubjectId = resolveExamSubjectSelection(
     state.academicSubjects,
@@ -3363,6 +3407,7 @@ window.startEditingExam = async examId => {
 window.cancelExamEditing = () => {
   state.editingExamId = null;
   state.editingExamTitle = '';
+  state.editingExamDurationMinutes = DEFAULT_EXAM_DURATION_MINUTES;
   state.editingExamClassId = '';
   state.editingExamSubjectId = '';
   state.editingExamQuestions = [];
@@ -3372,6 +3417,10 @@ window.cancelExamEditing = () => {
 
 window.updateEditingExamTitle = value => {
   state.editingExamTitle = value;
+};
+
+window.updateEditingExamDuration = value => {
+  state.editingExamDurationMinutes = value;
 };
 
 window.updateEditingExamAudience = (field, value) => {
@@ -3461,12 +3510,14 @@ window.submitExamUpdate = async event => {
     const result = await callExamApi('updateExam', {
       examId: state.editingExamId,
       title: state.editingExamTitle,
+      durationMinutes: state.editingExamDurationMinutes,
       classId: state.editingExamClassId,
       subjectId,
       questions: state.editingExamQuestions
     });
     state.editingExamId = null;
     state.editingExamTitle = '';
+    state.editingExamDurationMinutes = DEFAULT_EXAM_DURATION_MINUTES;
     state.editingExamClassId = '';
     state.editingExamSubjectId = '';
     state.editingExamQuestions = [];
