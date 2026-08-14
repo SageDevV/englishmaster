@@ -5,6 +5,7 @@ import {
   hashExamAnswer,
   normalizeExamAnswer,
   sanitizeExamAnswers,
+  validateMultipleChoiceQuestion,
   validateStudentName
 } from './examServices.js';
 
@@ -30,5 +31,26 @@ const blankResult = await gradeExamAnswers(exam, sanitizeExamAnswers([], questio
 assert.equal(blankResult.correctCount, 0);
 assert.equal(calculateExamElapsedSeconds(1_000, 61_000, 7_200), 60);
 assert.equal(calculateExamElapsedSeconds(1_000, 10_000_000, 7_200), 7_200);
+
+
+const multipleChoice = validateMultipleChoiceQuestion({
+  prompt: 'Choose the correct translation',
+  options: ['Computador', 'Computer', 'Keyboard', 'Mouse'],
+  correctOptionIndex: 1
+});
+assert.equal(multipleChoice.options.length, 4);
+assert.equal(multipleChoice.correctOptionIndex, 1);
+assert.throws(
+  () => validateMultipleChoiceQuestion({ prompt: 'Too few', options: ['Only one'], correctOptionIndex: 0 }),
+  /entre 2 e 4/
+);
+assert.throws(
+  () => validateMultipleChoiceQuestion({ prompt: 'Duplicates', options: ['Ação', 'acao'], correctOptionIndex: 0 }),
+  /devem ser diferentes/
+);
+assert.throws(
+  () => validateMultipleChoiceQuestion({ prompt: 'No correct', options: ['A', 'B'], correctOptionIndex: -1 }),
+  /Selecione a resposta correta/
+);
 
 console.log('examServices tests passed');

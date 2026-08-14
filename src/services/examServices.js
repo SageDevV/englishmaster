@@ -57,3 +57,26 @@ export function calculateExamElapsedSeconds(startedAtMillis, submittedAtMillis, 
     Math.floor((submittedAtMillis - startedAtMillis) / 1000)
   ));
 }
+
+
+export function validateMultipleChoiceQuestion(item, index = 0) {
+  const prompt = String(item?.prompt || '').trim();
+  const options = Array.isArray(item?.options)
+    ? item.options.map(option => String(option || '').trim())
+    : [];
+  const correctOptionIndex = Number(item?.correctOptionIndex);
+  if (!prompt) throw new Error(`Preencha a pergunta do item ${index + 1}.`);
+  if (prompt.length > 5000) throw new Error(`A pergunta do item ${index + 1} excede 5.000 caracteres.`);
+  if (options.length < 2 || options.length > 4) {
+    throw new Error(`A questão ${index + 1} deve ter entre 2 e 4 alternativas.`);
+  }
+  if (options.some(option => !option)) throw new Error(`Preencha todas as alternativas da questão ${index + 1}.`);
+  if (options.some(option => option.length > 5000)) throw new Error(`Uma alternativa da questão ${index + 1} excede 5.000 caracteres.`);
+  if (new Set(options.map(normalizeExamAnswer)).size !== options.length) {
+    throw new Error(`As alternativas da questão ${index + 1} devem ser diferentes.`);
+  }
+  if (!Number.isInteger(correctOptionIndex) || correctOptionIndex < 0 || correctOptionIndex >= options.length) {
+    throw new Error(`Selecione a resposta correta da questão ${index + 1}.`);
+  }
+  return { prompt, options, correctOptionIndex };
+}

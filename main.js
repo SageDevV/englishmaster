@@ -24,6 +24,7 @@ import {
   gradeExamAnswers,
   hashExamAnswer,
   sanitizeExamAnswers,
+  validateMultipleChoiceQuestion,
   validateStudentName
 } from './src/services/examServices.js';
 
@@ -60,6 +61,10 @@ function getFriendlyError(error, fallback = 'Não foi possível concluir a opera
 function createExamSalt() {
   const bytes = crypto.getRandomValues(new Uint8Array(16));
   return Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function createMultipleChoiceDraft() {
+  return { prompt: '', options: ['', ''], correctOptionIndex: 0 };
 }
 
 function timestampToMillis(value) {
@@ -161,14 +166,12 @@ async function createExamOnFreeTier(data) {
 
   const gradingSalt = createExamSalt();
   const questions = await Promise.all(data.questions.map(async (item, index) => {
-    const prompt = String(item?.prompt || '').trim();
-    const answer = String(item?.answer || '').trim();
-    if (!prompt || !answer) throw new Error(`Preencha a pergunta e a resposta correta do item ${index + 1}.`);
-    if (prompt.length > 5000 || answer.length > 5000) throw new Error(`O item ${index + 1} excede o limite de 5.000 caracteres.`);
+    const { prompt, options, correctOptionIndex } = validateMultipleChoiceQuestion(item, index);
     return {
       id: `q${index + 1}`,
       prompt,
-      answerHash: await hashExamAnswer(answer, gradingSalt)
+      options,
+      answerHash: await hashExamAnswer(options[correctOptionIndex], gradingSalt)
     };
   }));
 
@@ -242,16 +245,13 @@ async function updateExamOnFreeTier(data) {
   if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Mantenha pelo menos uma pergunta na prova.');
   const existingById = new Map(existing.questions.map(question => [question.id, question]));
   const questions = await Promise.all(data.questions.map(async (item, index) => {
-    const prompt = String(item?.prompt || '').trim();
-    const answer = String(item?.answer || '').trim();
+    const { prompt, options, correctOptionIndex } = validateMultipleChoiceQuestion(item, index);
     const previous = existingById.get(item?.id);
-    if (!prompt) throw new Error(`Preencha a pergunta do item ${index + 1}.`);
-    if (prompt.length > 5000 || answer.length > 5000) throw new Error(`O item ${index + 1} excede o limite de 5.000 caracteres.`);
-    if (!answer && !previous?.answerHash) throw new Error(`Informe a resposta correta da nova questão ${index + 1}.`);
     return {
       id: previous?.id || createManagedQuestionId(),
       prompt,
-      answerHash: answer ? await hashExamAnswer(answer, existing.gradingSalt) : previous.answerHash
+      options,
+      answerHash: await hashExamAnswer(options[correctOptionIndex], existing.gradingSalt)
     };
   }));
 
@@ -612,7 +612,7 @@ const state = {
   examSubmitting: false,
   examAutoSubmitAttempted: false,
   teacherExamTitle: 'Prova de Inglês',
-  teacherQuestions: [{ prompt: '', answer: '' }],
+  teacherQuestions: [createMultipleChoiceDraft()],
   teacherMessage: '',
   examResults: [],
   examResultsStatus: 'idle',
@@ -1303,6 +1303,37 @@ function formatExamDate(timestamp) {
   }).format(new Date(timestamp));
 }
 
+function renderAlternativeBuilder(item, questionIndex, mode) {
+  const options = Array.isArray(item.options) ? item.options : ['', ''];
+  const editing = mode === 'edit';
+  const updateHandler = editing ? 'updateEditingExamOption' : 'updateTeacherOption';
+  const correctHandler = editing ? 'setEditingCorrectOption' : 'setTeacherCorrectOption';
+  const removeHandler = editing ? 'removeEditingExamOption' : 'removeTeacherOption';
+  const addHandler = editing ? 'addEditingExamOption' : 'addTeacherOption';
+  const name = `${editing ? 'edit' : 'create'}-correct-${questionIndex}`;
+  return `
+    <fieldset class="alternative-builder">
+      <legend>Alternativas <small>Marque a resposta correta</small></legend>
+      <div class="alternative-list">
+        ${options.map((option, optionIndex) => `
+          <div class="alternative-editor-row ${Number(item.correctOptionIndex) === optionIndex ? 'correct' : ''}">
+            <label class="correct-choice-control" title="Marcar como resposta correta">
+              <input type="radio" name="${name}" ${Number(item.correctOptionIndex) === optionIndex ? 'checked' : ''}
+                onchange="window.${correctHandler}(${questionIndex}, ${optionIndex})" required />
+              <span>${String.fromCharCode(65 + optionIndex)}</span>
+            </label>
+            <input type="text" maxlength="5000" required value="${escapeHtml(option)}" placeholder="Alternativa ${String.fromCharCode(65 + optionIndex)}"
+              oninput="window.${updateHandler}(${questionIndex}, ${optionIndex}, this.value)" />
+            <button type="button" class="remove-alternative-btn" onclick="window.${removeHandler}(${questionIndex}, ${optionIndex})"
+              ${options.length <= 2 ? 'disabled' : ''} aria-label="Remover alternativa ${String.fromCharCode(65 + optionIndex)}">×</button>
+          </div>
+        `).join('')}
+      </div>
+      ${options.length < 4 ? `<button type="button" class="add-alternative-btn" onclick="window.${addHandler}(${questionIndex})">+ Adicionar alternativa</button>` : '<span class="alternative-limit">Limite de 4 alternativas atingido</span>'}
+    </fieldset>
+  `;
+}
+
 function renderTeacherExamCreator() {
   const mainContent = document.getElementById('main-content');
   mainContent.innerHTML = `
@@ -1311,7 +1342,7 @@ function renderTeacherExamCreator() {
         <div>
           <span class="eyebrow">Área do professor</span>
           <h2>Criação de Prova</h2>
-          <p>Monte o gabarito. Ao confirmar, esta prova substituirá a avaliação atualmente disponível.</p>
+          <p>Cadastre de 2 a 4 alternativas por pergunta e marque uma resposta correta. Ao confirmar, a prova ficará disponível.</p>
         </div>
       </div>
 
@@ -1323,7 +1354,7 @@ function renderTeacherExamCreator() {
         </label>
 
         <div class="builder-heading">
-          <h3>Perguntas e respostas</h3>
+          <h3>Perguntas e alternativas</h3>
           <span>${state.teacherQuestions.length} ${state.teacherQuestions.length === 1 ? 'questão' : 'questões'}</span>
         </div>
 
@@ -1336,11 +1367,7 @@ function renderTeacherExamCreator() {
                 <textarea required maxlength="5000" rows="3" placeholder="Digite a pergunta"
                   oninput="window.updateTeacherQuestion(${index}, 'prompt', this.value)">${escapeHtml(item.prompt)}</textarea>
               </label>
-              <label class="exam-field correct-answer-field">
-                <span>Resposta correta</span>
-                <textarea required maxlength="5000" rows="2" placeholder="Digite a resposta esperada"
-                  oninput="window.updateTeacherQuestion(${index}, 'answer', this.value)">${escapeHtml(item.answer)}</textarea>
-              </label>
+              ${renderAlternativeBuilder(item, index, 'create')}
               <button type="button" class="remove-question-btn" onclick="window.removeTeacherQuestion(${index})"
                 ${state.teacherQuestions.length === 1 ? 'disabled' : ''} aria-label="Remover questão ${index + 1}">Remover</button>
             </article>
@@ -1412,21 +1439,18 @@ function renderTeacherExamEditor(mainContent) {
   mainContent.innerHTML = `
     <section class="exam-page teacher-exam-editor">
       <div class="exam-page-heading">
-        <div><span class="eyebrow">Editar prova</span><h2>${escapeHtml(state.editingExamTitle)}</h2><p>Deixe a resposta correta em branco para manter o gabarito atual.</p></div>
+        <div><span class="eyebrow">Editar prova</span><h2>${escapeHtml(state.editingExamTitle)}</h2><p>Cadastre de 2 a 4 alternativas e marque uma delas como resposta correta.</p></div>
         <button class="secondary-btn" onclick="window.cancelExamEditing()">Cancelar edição</button>
       </div>
       <form class="exam-builder" onsubmit="window.submitExamUpdate(event)">
         <label class="exam-field"><span>Título da prova</span><input type="text" maxlength="120" required value="${escapeHtml(state.editingExamTitle)}" oninput="window.updateEditingExamTitle(this.value)" /></label>
-        <div class="builder-heading"><h3>Perguntas e respostas</h3><span>${state.editingExamQuestions.length} ${state.editingExamQuestions.length === 1 ? 'questão' : 'questões'}</span></div>
+        <div class="builder-heading"><h3>Perguntas e alternativas</h3><span>${state.editingExamQuestions.length} ${state.editingExamQuestions.length === 1 ? 'questão' : 'questões'}</span></div>
         <div class="question-builder-list">
           ${state.editingExamQuestions.map((item, index) => `
             <article class="question-builder-card">
               <div class="question-builder-number">${index + 1}</div>
               <label class="exam-field"><span>Pergunta</span><textarea required maxlength="5000" rows="3" oninput="window.updateEditingExamQuestion(${index}, 'prompt', this.value)">${escapeHtml(item.prompt)}</textarea></label>
-              <label class="exam-field correct-answer-field">
-                <span>Resposta correta ${item.id ? '<small>(opcional se não mudou)</small>' : '<small>(obrigatória)</small>'}</span>
-                <textarea ${item.id ? '' : 'required'} maxlength="5000" rows="2" placeholder="${item.id ? 'Deixe em branco para manter a resposta atual' : 'Digite a resposta correta'}" oninput="window.updateEditingExamQuestion(${index}, 'answer', this.value)">${escapeHtml(item.answer || '')}</textarea>
-              </label>
+              ${renderAlternativeBuilder(item, index, 'edit')}
               <button type="button" class="remove-question-btn" onclick="window.removeEditingExamQuestion(${index})" ${state.editingExamQuestions.length === 1 ? 'disabled' : ''}>Remover</button>
             </article>
           `).join('')}
@@ -1598,6 +1622,25 @@ function renderExamInstructions(mainContent) {
   `;
 }
 
+function renderStudentExamOptions(question, questionIndex) {
+  const selectedAnswer = state.examAnswers[questionIndex]?.value || '';
+  return `
+    <fieldset class="student-exam-options">
+      <legend>Selecione uma alternativa</legend>
+      ${question.options.map((option, optionIndex) => {
+        const selected = selectedAnswer === option;
+        return `
+          <button type="button" class="student-exam-option ${selected ? 'selected' : ''}"
+            onclick="window.selectStudentExamOption(${questionIndex}, ${optionIndex})" aria-pressed="${selected}">
+            <span class="student-option-letter">${String.fromCharCode(65 + optionIndex)}</span>
+            <span>${escapeHtml(option)}</span>
+          </button>
+        `;
+      }).join('')}
+    </fieldset>
+  `;
+}
+
 function renderActiveExam(mainContent) {
   const attempt = state.examAttempt;
   const questions = state.exam.questions || [];
@@ -1613,7 +1656,9 @@ function renderActiveExam(mainContent) {
           <article class="student-question-card">
             <div class="student-question-number">Questão ${index + 1} de ${questions.length}</div>
             <h3>${escapeHtml(question.prompt)}</h3>
-            <label class="exam-field"><span>Sua resposta</span><textarea rows="4" maxlength="5000" placeholder="Digite sua resposta" oninput="window.updateStudentExamAnswer(${index}, this.value)">${escapeHtml(state.examAnswers[index]?.value || '')}</textarea></label>
+            ${Array.isArray(question.options) && question.options.length >= 2
+              ? renderStudentExamOptions(question, index)
+              : `<label class="exam-field"><span>Sua resposta</span><textarea rows="4" maxlength="5000" placeholder="Digite sua resposta" oninput="window.updateStudentExamAnswer(${index}, this.value)">${escapeHtml(state.examAnswers[index]?.value || '')}</textarea></label>`}
           </article>
         `).join('')}
         ${state.examMessage ? `<div class="exam-alert error" role="alert">${escapeHtml(state.examMessage)}</div>` : ''}
@@ -1743,12 +1788,41 @@ window.updateTeacherExamTitle = value => {
 };
 
 window.updateTeacherQuestion = (index, field, value) => {
-  if (!state.teacherQuestions[index] || !['prompt', 'answer'].includes(field)) return;
-  state.teacherQuestions[index][field] = value;
+  if (!state.teacherQuestions[index] || field !== 'prompt') return;
+  state.teacherQuestions[index].prompt = value;
+};
+
+window.updateTeacherOption = (questionIndex, optionIndex, value) => {
+  const question = state.teacherQuestions[questionIndex];
+  if (!question?.options || optionIndex < 0 || optionIndex >= question.options.length) return;
+  question.options[optionIndex] = value;
+};
+
+window.setTeacherCorrectOption = (questionIndex, optionIndex) => {
+  const question = state.teacherQuestions[questionIndex];
+  if (!question?.options?.[optionIndex] && question?.options?.[optionIndex] !== '') return;
+  question.correctOptionIndex = optionIndex;
+  renderTeacherExamCreator();
+};
+
+window.addTeacherOption = questionIndex => {
+  const question = state.teacherQuestions[questionIndex];
+  if (!question?.options || question.options.length >= 4) return;
+  question.options.push('');
+  renderTeacherExamCreator();
+};
+
+window.removeTeacherOption = (questionIndex, optionIndex) => {
+  const question = state.teacherQuestions[questionIndex];
+  if (!question?.options || question.options.length <= 2) return;
+  question.options.splice(optionIndex, 1);
+  if (question.correctOptionIndex === optionIndex) question.correctOptionIndex = 0;
+  else if (question.correctOptionIndex > optionIndex) question.correctOptionIndex--;
+  renderTeacherExamCreator();
 };
 
 window.addTeacherQuestion = () => {
-  state.teacherQuestions.push({ prompt: '', answer: '' });
+  state.teacherQuestions.push(createMultipleChoiceDraft());
   renderTeacherExamCreator();
   requestAnimationFrame(() => document.querySelector('.question-builder-card:last-child textarea')?.focus());
 };
@@ -1772,7 +1846,7 @@ window.submitExamCreation = async event => {
     });
     state.teacherMessage = `Prova criada com sucesso: ${result.questionCount} questão(ões) publicada(s).`;
     state.teacherExamTitle = 'Prova de Inglês';
-    state.teacherQuestions = [{ prompt: '', answer: '' }];
+    state.teacherQuestions = [createMultipleChoiceDraft()];
     state.teacherExamsStatus = 'idle';
     state.examResultsStatus = 'idle';
   } catch (error) {
@@ -1787,17 +1861,28 @@ window.refreshTeacherExams = () => {
   renderTeacherExamManager();
 };
 
-window.startEditingExam = examId => {
+window.startEditingExam = async examId => {
   const exam = state.teacherExams.find(item => item.id === examId);
   if (!exam) return;
+  state.teacherExamsMessage = '';
+  state.teacherExamsStatus = 'loading';
+  renderTeacherExamManager();
+  const questions = await Promise.all(exam.questions.map(async question => {
+    const options = Array.isArray(question.options) && question.options.length >= 2
+      ? [...question.options]
+      : ['', ''];
+    let correctOptionIndex = 0;
+    if (question.options?.length) {
+      const hashes = await Promise.all(options.map(option => hashExamAnswer(option, exam.gradingSalt)));
+      const matchedIndex = hashes.findIndex(hash => hash === question.answerHash);
+      if (matchedIndex >= 0) correctOptionIndex = matchedIndex;
+    }
+    return { id: question.id, prompt: question.prompt, options, correctOptionIndex };
+  }));
   state.editingExamId = exam.id;
   state.editingExamTitle = exam.title;
-  state.editingExamQuestions = exam.questions.map(question => ({
-    id: question.id,
-    prompt: question.prompt,
-    answer: ''
-  }));
-  state.teacherExamsMessage = '';
+  state.editingExamQuestions = questions;
+  state.teacherExamsStatus = 'ready';
   renderTeacherExamManager();
 };
 
@@ -1814,12 +1899,41 @@ window.updateEditingExamTitle = value => {
 };
 
 window.updateEditingExamQuestion = (index, field, value) => {
-  if (!state.editingExamQuestions[index] || !['prompt', 'answer'].includes(field)) return;
-  state.editingExamQuestions[index][field] = value;
+  if (!state.editingExamQuestions[index] || field !== 'prompt') return;
+  state.editingExamQuestions[index].prompt = value;
+};
+
+window.updateEditingExamOption = (questionIndex, optionIndex, value) => {
+  const question = state.editingExamQuestions[questionIndex];
+  if (!question?.options || optionIndex < 0 || optionIndex >= question.options.length) return;
+  question.options[optionIndex] = value;
+};
+
+window.setEditingCorrectOption = (questionIndex, optionIndex) => {
+  const question = state.editingExamQuestions[questionIndex];
+  if (!question?.options || optionIndex < 0 || optionIndex >= question.options.length) return;
+  question.correctOptionIndex = optionIndex;
+  renderTeacherExamManager();
+};
+
+window.addEditingExamOption = questionIndex => {
+  const question = state.editingExamQuestions[questionIndex];
+  if (!question?.options || question.options.length >= 4) return;
+  question.options.push('');
+  renderTeacherExamManager();
+};
+
+window.removeEditingExamOption = (questionIndex, optionIndex) => {
+  const question = state.editingExamQuestions[questionIndex];
+  if (!question?.options || question.options.length <= 2) return;
+  question.options.splice(optionIndex, 1);
+  if (question.correctOptionIndex === optionIndex) question.correctOptionIndex = 0;
+  else if (question.correctOptionIndex > optionIndex) question.correctOptionIndex--;
+  renderTeacherExamManager();
 };
 
 window.addEditingExamQuestion = () => {
-  state.editingExamQuestions.push({ id: null, prompt: '', answer: '' });
+  state.editingExamQuestions.push({ id: null, ...createMultipleChoiceDraft() });
   renderTeacherExamManager();
   requestAnimationFrame(() => document.querySelector('.question-builder-card:last-child textarea')?.focus());
 };
@@ -1961,6 +2075,14 @@ window.confirmExamStart = async () => {
     state.examMessage = getFriendlyError(error, 'Não foi possível iniciar a prova.');
     state.examScreen = 'instructions';
   }
+  renderExamPortal();
+};
+
+window.selectStudentExamOption = (questionIndex, optionIndex) => {
+  const question = state.exam?.questions?.[questionIndex];
+  const option = question?.options?.[optionIndex];
+  if (option === undefined) return;
+  window.updateStudentExamAnswer(questionIndex, option);
   renderExamPortal();
 };
 
