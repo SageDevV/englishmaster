@@ -123,6 +123,19 @@ async function getActiveExamDocument() {
   return snapshot.docs.sort((a, b) => timestampToMillis(b.data().createdAt) - timestampToMillis(a.data().createdAt))[0];
 }
 
+async function getStudentVisibleExamDocument() {
+  const activeExam = await getActiveExamDocument();
+  if (activeExam) return activeExam;
+  const snapshot = await db.collection('exams').get();
+  return snapshot.docs
+    .filter(doc => doc.data().deleted !== true)
+    .sort((a, b) => {
+      const aTime = timestampToMillis(a.data().updatedAt || a.data().createdAt);
+      const bTime = timestampToMillis(b.data().updatedAt || b.data().createdAt);
+      return bTime - aTime;
+    })[0] || null;
+}
+
 function getExamAttemptId(examId, uid) {
   return `${examId}__${uid}`;
 }
@@ -311,6 +324,27 @@ async function publishExamOnFreeTier(data) {
   return { ok: true };
 }
 
+async function deactivateExamOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const examId = String(data.examId || '');
+  const examRef = db.collection('exams').doc(examId);
+  const [examDoc, examsWithRunningAttempts] = await Promise.all([
+    examRef.get(),
+    getExamsWithRunningAttempts()
+  ]);
+  if (!examDoc.exists || examDoc.data().deleted === true) throw new Error('Prova não encontrada.');
+  if (examsWithRunningAttempts.has(examId)) {
+    throw new Error('Esta prova possui uma tentativa em andamento e não pode ser desativada agora.');
+  }
+  if (examDoc.data().active !== true) return { ok: true };
+  await examRef.update({
+    active: false,
+    deactivatedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true };
+}
+
 async function deleteExamOnFreeTier(data) {
   if (!isAdmin()) throw new Error('Área exclusiva do professor.');
   const examId = String(data.examId || '');
@@ -333,7 +367,7 @@ async function deleteExamOnFreeTier(data) {
 }
 
 async function getExamStateOnFreeTier() {
-  const examDoc = await getActiveExamDocument();
+  const examDoc = await getStudentVisibleExamDocument();
   if (!examDoc) return { exam: null, attempt: null };
   const exam = serializeExamDocument(examDoc);
   const attemptRef = db.collection('examAttempts').doc(getExamAttemptId(exam.id, state.user.uid));
@@ -474,6 +508,7 @@ const freeTierApi = {
   listRegisteredExams: listRegisteredExamsOnFreeTier,
   updateExam: updateExamOnFreeTier,
   publishExam: publishExamOnFreeTier,
+  deactivateExam: deactivateExamOnFreeTier,
   deleteExam: deleteExamOnFreeTier,
   getExamState: getExamStateOnFreeTier,
   startExam: startExamOnFreeTier,
@@ -1050,7 +1085,7 @@ function updateHeader() {
         <button class="nav-btn ${state.currentView === 'teacher-exams' ? 'active' : ''}" onclick="window.navigateTo('teacher-exams')">Provas cadastradas</button>
         <button class="nav-btn ${state.currentView === 'teacher-results' ? 'active' : ''}" onclick="window.navigateTo('teacher-results')">Resultados</button>
       ` : `
-        <button class="nav-btn ${state.currentView === 'exam' ? 'active' : ''}" onclick="window.navigateTo('exam')">Prova</button>
+        <button class="nav-btn ${state.currentView === 'exam' ? 'active' : ''}" onclick="window.navigateTo('exam')">${state.examScreen === 'locked' ? '🔒 ' : ''}Prova</button>
       `}
     </nav>
 
@@ -1344,14 +1379,16 @@ function renderTeacherExamManager() {
             ${state.teacherExams.map(exam => `
               <article class="registered-exam-card ${exam.active ? 'active' : ''}">
                 <div class="registered-exam-topline">
-                  <span class="exam-status-badge ${exam.active ? 'active' : 'inactive'}">${exam.active ? 'Disponível aos alunos' : 'Arquivada'}</span>
+                  <span class="exam-status-badge ${exam.active ? 'active' : 'inactive'}">${exam.active ? 'Ativa para alunos' : '🔒 Desativada'}</span>
                   <span class="registered-exam-date">${formatExamDate(exam.updatedAtMillis || exam.createdAtMillis)}</span>
                 </div>
                 <h3>${escapeHtml(exam.title)}</h3>
                 <p>${exam.questionCount} ${exam.questionCount === 1 ? 'questão cadastrada' : 'questões cadastradas'}</p>
                 <div class="registered-exam-actions">
                   <button class="secondary-btn" onclick="window.startEditingExam('${exam.id}')">Editar</button>
-                  ${exam.active ? '' : `<button class="publish-exam-btn" onclick="window.publishRegisteredExam('${exam.id}')">Publicar</button>`}
+                  ${exam.active
+                    ? `<button class="deactivate-exam-btn" onclick="window.deactivateRegisteredExam('${exam.id}')">Desativar</button>`
+                    : `<button class="publish-exam-btn" onclick="window.publishRegisteredExam('${exam.id}')">Ativar</button>`}
                   <button class="delete-exam-btn" onclick="window.deleteRegisteredExam('${exam.id}')">Excluir</button>
                 </div>
               </article>
@@ -1362,7 +1399,7 @@ function renderTeacherExamManager() {
   mainContent.innerHTML = `
     <section class="exam-page teacher-exams-manager">
       <div class="exam-page-heading results-heading">
-        <div><span class="eyebrow">Área do professor</span><h2>Provas cadastradas</h2><p>Visualize, atualize, publique ou remova avaliações.</p></div>
+        <div><span class="eyebrow">Área do professor</span><h2>Provas cadastradas</h2><p>Visualize, atualize, ative, desative ou remova avaliações.</p></div>
         <button class="secondary-btn" onclick="window.refreshTeacherExams()">Atualizar lista</button>
       </div>
       ${state.teacherExamsMessage && state.teacherExamsStatus !== 'error' ? `<div class="exam-alert ${state.teacherExamsMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.teacherExamsMessage)}</div>` : ''}
@@ -1487,6 +1524,21 @@ function renderExamPortal() {
     mainContent.innerHTML = '<section class="exam-page"><div class="exam-empty"><div class="empty-icon">📝</div><h2>Nenhuma prova disponível</h2><p>O professor ainda não publicou uma avaliação. Volte mais tarde.</p></div></section>';
     return;
   }
+  if (state.examScreen === 'locked') {
+    mainContent.innerHTML = `
+      <section class="exam-page locked-exam-page">
+        <div class="locked-exam-card">
+          <div class="locked-exam-icon" aria-hidden="true">🔒</div>
+          <span class="eyebrow">Avaliação bloqueada</span>
+          <h2>${escapeHtml(state.exam.title)}</h2>
+          <p>Esta prova está cadastrada, mas ainda não foi ativada pelo professor.</p>
+          <div class="locked-exam-info"><span>${state.exam.questionCount} ${state.exam.questionCount === 1 ? 'questão' : 'questões'}</span><span>Tempo previsto: 2 horas</span></div>
+          <div class="exam-alert locked" role="status">Aguarde o professor liberar a avaliação. Enquanto estiver bloqueada, nenhuma tentativa poderá ser iniciada.</div>
+        </div>
+      </section>
+    `;
+    return;
+  }
   if (state.examScreen === 'instructions') {
     renderExamInstructions(mainContent);
     return;
@@ -1607,6 +1659,8 @@ async function loadExamPortal() {
     state.examMessage = '';
     if (!data.exam) {
       state.examScreen = 'empty';
+    } else if (!data.attempt && data.exam.active !== true) {
+      state.examScreen = 'locked';
     } else if (!data.attempt) {
       state.examScreen = 'identify';
     } else if (data.attempt.status === 'submitted') {
@@ -1620,7 +1674,10 @@ async function loadExamPortal() {
     state.examScreen = 'error';
     state.examMessage = getFriendlyError(error, 'Não foi possível carregar a prova.');
   }
-  if (state.currentView === 'exam') renderExamPortal();
+  if (state.currentView === 'exam') {
+    updateHeader();
+    renderExamPortal();
+  }
 }
 
 function startExamCountdown() {
@@ -1800,17 +1857,34 @@ window.submitExamUpdate = async event => {
 };
 
 window.publishRegisteredExam = async examId => {
-  if (!window.confirm('Deseja disponibilizar esta prova aos alunos? A prova ativa atual será arquivada.')) return;
+  if (!window.confirm('Deseja ativar esta prova para os alunos? A prova ativa atual será desativada.')) return;
   state.teacherExamsStatus = 'loading';
   state.teacherExamsMessage = '';
   renderTeacherExamManager();
   try {
     await callExamApi('publishExam', { examId });
-    state.teacherExamsMessage = 'Prova publicada com sucesso.';
+    state.teacherExamsMessage = 'Prova ativada com sucesso e disponível aos alunos.';
     state.teacherExamsStatus = 'idle';
     state.examScreen = 'idle';
   } catch (error) {
-    state.teacherExamsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível publicar a prova.')}`;
+    state.teacherExamsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível ativar a prova.')}`;
+    state.teacherExamsStatus = 'ready';
+  }
+  renderTeacherExamManager();
+};
+
+window.deactivateRegisteredExam = async examId => {
+  if (!window.confirm('Deseja desativar esta prova? Os alunos verão a avaliação bloqueada e não poderão iniciá-la.')) return;
+  state.teacherExamsStatus = 'loading';
+  state.teacherExamsMessage = '';
+  renderTeacherExamManager();
+  try {
+    await callExamApi('deactivateExam', { examId });
+    state.teacherExamsMessage = 'Prova desativada. Ela agora aparece bloqueada para os alunos.';
+    state.teacherExamsStatus = 'idle';
+    state.examScreen = 'idle';
+  } catch (error) {
+    state.teacherExamsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível desativar a prova.')}`;
     state.teacherExamsStatus = 'ready';
   }
   renderTeacherExamManager();

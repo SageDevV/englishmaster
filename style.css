@@ -1878,6 +1878,7 @@ h1 {
 }
 
 .publish-exam-btn,
+.deactivate-exam-btn,
 .delete-exam-btn {
   padding: 0.7rem 0.9rem;
   border: 1px solid;
@@ -1896,6 +1897,16 @@ h1 {
 
 .publish-exam-btn:hover {
   background: rgba(16, 185, 129, 0.2);
+}
+
+.deactivate-exam-btn {
+  color: #fde68a;
+  border-color: rgba(245, 158, 11, 0.45);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.deactivate-exam-btn:hover {
+  background: rgba(245, 158, 11, 0.2);
 }
 
 .delete-exam-btn {
@@ -1926,4 +1937,70 @@ h1 {
   .delete-exam-btn {
     margin-left: 0;
   }
+}
+
+
+/* --- Locked Exam State --- */
+.locked-exam-page {
+  display: grid;
+  place-items: center;
+  min-height: 440px;
+}
+
+.locked-exam-card {
+  width: min(100%, 650px);
+  padding: clamp(1.5rem, 5vw, 3rem);
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 1.2rem;
+  background: radial-gradient(circle at top, rgba(245, 158, 11, 0.09), rgba(10, 10, 10, 0.9) 55%);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.35);
+  text-align: center;
+}
+
+.locked-exam-icon {
+  display: grid;
+  place-items: center;
+  width: 88px;
+  height: 88px;
+  margin: 0 auto 1.2rem;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+  border-radius: 50%;
+  background: rgba(245, 158, 11, 0.1);
+  font-size: 2.8rem;
+  box-shadow: 0 0 35px rgba(245, 158, 11, 0.12);
+}
+
+.locked-exam-card h2 {
+  margin: 0.35rem 0 0.75rem;
+  font-size: clamp(1.8rem, 5vw, 2.7rem);
+}
+
+.locked-exam-card > p {
+  color: var(--text-muted);
+  line-height: 1.55;
+}
+
+.locked-exam-info {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin: 1.4rem 0;
+}
+
+.locked-exam-info span {
+  padding: 0.45rem 0.75rem;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  color: #d4d4d8;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.exam-alert.locked {
+  margin-top: 0;
+  color: #fde68a;
+  border-color: rgba(245, 158, 11, 0.4);
+  background: rgba(245, 158, 11, 0.09);
 }
