@@ -20,12 +20,21 @@ import {
   validateNickname
 } from './src/services/gameServices.js';
 import {
+  ATTACHMENT_CHUNK_SIZE_BYTES,
   calculateExamElapsedSeconds,
+  EXAM_QUESTION_TYPES,
+  getExamQuestionType,
   gradeExamAnswers,
+  hasZipFileSignature,
+  hashAttachmentBytes,
   hashExamAnswer,
+  MAX_ZIP_FILE_SIZE_BYTES,
   sanitizeExamAnswers,
+  splitAttachmentBytes,
   validateMultipleChoiceQuestion,
-  validateStudentName
+  validateStudentName,
+  validateZipAttachmentQuestion,
+  validateZipFileDescriptor
 } from './src/services/examServices.js';
 import {
   isStudentProfileComplete,
@@ -70,7 +79,20 @@ function createExamSalt() {
 }
 
 function createMultipleChoiceDraft() {
-  return { prompt: '', options: ['', ''], correctOptionIndex: 0 };
+  return {
+    type: EXAM_QUESTION_TYPES.MULTIPLE_CHOICE,
+    prompt: '',
+    options: ['', ''],
+    correctOptionIndex: 0
+  };
+}
+
+function createZipAttachmentDraft() {
+  return {
+    type: EXAM_QUESTION_TYPES.ZIP_ATTACHMENT,
+    prompt: '',
+    maxFileSizeBytes: MAX_ZIP_FILE_SIZE_BYTES
+  };
 }
 
 function timestampToMillis(value) {
@@ -151,6 +173,47 @@ function getExamAttemptId(examId, uid) {
   return `${examId}__${uid}`;
 }
 
+function getExamAttachmentId(attemptId, questionId, slot) {
+  return `${attemptId}__${questionId}__${slot}`;
+}
+
+function serializeAttachmentMetadata(id, data = {}) {
+  return {
+    id,
+    attemptId: data.attemptId,
+    examId: data.examId,
+    questionId: data.questionId,
+    questionIndex: Number(data.questionIndex),
+    userId: data.userId,
+    fileName: data.fileName,
+    contentType: data.contentType,
+    size: Number(data.size || 0),
+    chunkCount: Number(data.chunkCount || 0),
+    sha256: data.sha256 || '',
+    status: data.status || 'uploading',
+    uploadedAtMillis: timestampToMillis(data.uploadedAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt)
+  };
+}
+
+async function loadAttemptAttachments(exam, answers = [], userId = state.user?.uid) {
+  if (!exam?.id || !userId) return {};
+  const answersByQuestion = new Map((answers || []).map(answer => [answer.questionId, answer.value]));
+  const attachmentEntries = (exam.questions || [])
+    .filter(question => getExamQuestionType(question) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT)
+    .map(question => [question, answersByQuestion.get(question.id)])
+    .filter(([, attachmentId]) => Boolean(attachmentId));
+  const documents = await Promise.all(attachmentEntries.map(([, attachmentId]) =>
+    db.collection('examAttachments').doc(attachmentId).get()
+  ));
+  return Object.fromEntries(documents
+    .filter(doc => doc.exists && doc.data().status === 'ready')
+    .map(doc => {
+      const metadata = serializeAttachmentMetadata(doc.id, doc.data());
+      return [metadata.questionId, metadata];
+    }));
+}
+
 function attemptIsStillRunning(attempt) {
   return attempt.status === 'in_progress'
     && Date.now() < timestampToMillis(attempt.startedAt) + EXAM_DURATION_SECONDS * 1000;
@@ -164,6 +227,30 @@ async function getExamsWithRunningAttempts() {
     .map(attempt => attempt.examId));
 }
 
+async function buildStoredExamQuestion(item, index, gradingSalt, questionId) {
+  if (getExamQuestionType(item) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT) {
+    const zipQuestion = validateZipAttachmentQuestion(item, index);
+    return {
+      id: questionId,
+      type: zipQuestion.type,
+      prompt: zipQuestion.prompt,
+      maxFileSizeBytes: zipQuestion.maxFileSizeBytes
+    };
+  }
+
+  const multipleChoice = validateMultipleChoiceQuestion(item, index);
+  return {
+    id: questionId,
+    type: multipleChoice.type,
+    prompt: multipleChoice.prompt,
+    options: multipleChoice.options,
+    answerHash: await hashExamAnswer(
+      multipleChoice.options[multipleChoice.correctOptionIndex],
+      gradingSalt
+    )
+  };
+}
+
 async function createExamOnFreeTier(data) {
   if (!isAdmin()) throw new Error('Área exclusiva do professor.');
   const title = String(data.title || 'Prova de Inglês').trim().slice(0, 120);
@@ -171,15 +258,9 @@ async function createExamOnFreeTier(data) {
   if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Adicione pelo menos uma pergunta à prova.');
 
   const gradingSalt = createExamSalt();
-  const questions = await Promise.all(data.questions.map(async (item, index) => {
-    const { prompt, options, correctOptionIndex } = validateMultipleChoiceQuestion(item, index);
-    return {
-      id: `q${index + 1}`,
-      prompt,
-      options,
-      answerHash: await hashExamAnswer(options[correctOptionIndex], gradingSalt)
-    };
-  }));
+  const questions = await Promise.all(data.questions.map((item, index) =>
+    buildStoredExamQuestion(item, index, gradingSalt, `q${index + 1}`)
+  ));
 
   const [activeSnapshot, examsWithRunningAttempts] = await Promise.all([
     db.collection('exams').where('active', '==', true).get(),
@@ -250,15 +331,14 @@ async function updateExamOnFreeTier(data) {
   if (!title) throw new Error('Informe o título da prova.');
   if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Mantenha pelo menos uma pergunta na prova.');
   const existingById = new Map(existing.questions.map(question => [question.id, question]));
-  const questions = await Promise.all(data.questions.map(async (item, index) => {
-    const { prompt, options, correctOptionIndex } = validateMultipleChoiceQuestion(item, index);
+  const questions = await Promise.all(data.questions.map((item, index) => {
     const previous = existingById.get(item?.id);
-    return {
-      id: previous?.id || createManagedQuestionId(),
-      prompt,
-      options,
-      answerHash: await hashExamAnswer(options[correctOptionIndex], existing.gradingSalt)
-    };
+    return buildStoredExamQuestion(
+      item,
+      index,
+      existing.gradingSalt,
+      previous?.id || createManagedQuestionId()
+    );
   }));
 
   if (legacyAttempts.length) {
@@ -493,6 +573,17 @@ async function listExamResultsOnFreeTier() {
     const exam = exams.get(item.examId);
     if (!exam) continue;
     const computed = await serializeAttemptData(item, exam);
+    const attachmentFeedback = (computed.feedback || [])
+      .filter(feedback => feedback.requiresManualReview);
+    const attachmentIds = attachmentFeedback
+      .map(feedback => feedback.attachmentId)
+      .filter(Boolean);
+    const attachmentDocs = await Promise.all(attachmentIds.map(attachmentId =>
+      db.collection('examAttachments').doc(attachmentId).get()
+    ));
+    const attachments = attachmentDocs
+      .filter(doc => doc.exists && doc.data().status === 'ready')
+      .map(doc => serializeAttachmentMetadata(doc.id, doc.data()));
     results.push({
       id: item.id,
       examId: item.examId,
@@ -502,13 +593,57 @@ async function listExamResultsOnFreeTier() {
       userEmail: item.userEmail,
       elapsedSeconds: computed.elapsedSeconds,
       correctCount: computed.correctCount,
+      autoGradedCount: computed.autoGradedCount,
+      manualReviewCount: computed.manualReviewCount,
       totalQuestions: computed.totalQuestions,
       percentage: computed.percentage,
+      attachments,
       submittedAtMillis: computed.submittedAtMillis
     });
   }
   results.sort((a, b) => b.submittedAtMillis - a.submittedAtMillis);
   return { results };
+}
+
+async function downloadExamAttachmentOnFreeTier(attachmentId) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const attachmentRef = db.collection('examAttachments').doc(String(attachmentId || ''));
+  const attachmentDoc = await attachmentRef.get();
+  if (!attachmentDoc.exists || attachmentDoc.data().status !== 'ready') {
+    throw new Error('Anexo ZIP não encontrado ou ainda incompleto.');
+  }
+
+  const metadata = serializeAttachmentMetadata(attachmentDoc.id, attachmentDoc.data());
+  if (metadata.chunkCount < 1 || metadata.chunkCount > Math.ceil(MAX_ZIP_FILE_SIZE_BYTES / ATTACHMENT_CHUNK_SIZE_BYTES)) {
+    throw new Error('Quantidade de partes do anexo inválida.');
+  }
+  const chunkDocs = await Promise.all(Array.from({ length: metadata.chunkCount }, (_, index) =>
+    attachmentRef.collection('chunks').doc(String(index)).get()
+  ));
+  if (chunkDocs.some(doc => !doc.exists)) throw new Error('O anexo está incompleto.');
+
+  const chunks = chunkDocs.map(doc => doc.data().data.toUint8Array());
+  const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (totalSize !== metadata.size) throw new Error('O tamanho do anexo não confere.');
+  const bytes = new Uint8Array(totalSize);
+  let offset = 0;
+  chunks.forEach(chunk => {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  });
+  if (!hasZipFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
+    throw new Error('A integridade do arquivo ZIP não pôde ser confirmada.');
+  }
+
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = metadata.fileName || 'projeto.zip';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { ok: true, fileName: metadata.fileName };
 }
 
 async function deleteExamResultLogOnFreeTier(data) {
@@ -539,6 +674,7 @@ const freeTierApi = {
   saveExamAnswers: saveExamAnswersOnFreeTier,
   submitExam: submitExamOnFreeTier,
   listExamResults: listExamResultsOnFreeTier,
+  downloadExamAttachment: ({ attachmentId }) => downloadExamAttachmentOnFreeTier(attachmentId),
   deleteExamResultLog: deleteExamResultLogOnFreeTier
 };
 
@@ -631,6 +767,8 @@ const state = {
   exam: null,
   examAttempt: null,
   examAnswers: [],
+  examAttachments: {},
+  examAttachmentUploads: {},
   examScreen: 'idle',
   examMessage: '',
   pendingIdentity: null,
@@ -1072,6 +1210,8 @@ window.navigateTo = view => {
   if (view === 'exam') {
     state.examScreen = 'idle';
     state.pendingIdentity = null;
+    state.examAttachments = {};
+    state.examAttachmentUploads = {};
   }
   if (view === 'teacher-exams') state.teacherExamsStatus = 'idle';
   if (view === 'teacher-results') state.examResultsStatus = 'idle';
@@ -1232,7 +1372,7 @@ function renderHubHome() {
         icon: '✦',
         kicker: 'Avaliações',
         title: 'Criar prova',
-        description: 'Monte avaliações de múltipla escolha e publique para os alunos.'
+        description: 'Monte avaliações objetivas ou solicite projetos em arquivo ZIP.'
       },
       {
         view: 'teacher-exams',
@@ -1570,6 +1710,40 @@ function formatExamDate(timestamp) {
   }).format(new Date(timestamp));
 }
 
+function formatAttachmentSize(bytes) {
+  const size = Math.max(0, Number(bytes) || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function renderQuestionTypeSelector(item, questionIndex, mode) {
+  const editing = mode === 'edit';
+  const handler = editing ? 'changeEditingExamQuestionType' : 'changeTeacherQuestionType';
+  const type = getExamQuestionType(item);
+  return `
+    <label class="exam-field question-type-field">
+      <span>Tipo de pergunta</span>
+      <select onchange="window.${handler}(${questionIndex}, this.value)">
+        <option value="${EXAM_QUESTION_TYPES.MULTIPLE_CHOICE}" ${type === EXAM_QUESTION_TYPES.MULTIPLE_CHOICE ? 'selected' : ''}>Múltipla escolha</option>
+        <option value="${EXAM_QUESTION_TYPES.ZIP_ATTACHMENT}" ${type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT ? 'selected' : ''}>Resposta com anexo ZIP</option>
+      </select>
+    </label>
+  `;
+}
+
+function renderZipAttachmentBuilder() {
+  return `
+    <div class="zip-question-config">
+      <span class="zip-question-icon" aria-hidden="true">ZIP</span>
+      <div>
+        <strong>Entrega de repositório ou projeto</strong>
+        <p>O aluno deverá anexar um único arquivo <code>.zip</code> de até 5 MB. Esta questão será encaminhada para revisão manual.</p>
+      </div>
+    </div>
+  `;
+}
+
 function renderAlternativeBuilder(item, questionIndex, mode) {
   const options = Array.isArray(item.options) ? item.options : ['', ''];
   const editing = mode === 'edit';
@@ -1609,7 +1783,7 @@ function renderTeacherExamCreator() {
         <div>
           <span class="eyebrow">Área do professor</span>
           <h2>Criação de Prova</h2>
-          <p>Cadastre de 2 a 4 alternativas por pergunta e marque uma resposta correta. Ao confirmar, a prova ficará disponível.</p>
+          <p>Escolha entre perguntas de múltipla escolha ou entregas de projetos em arquivo ZIP para revisão manual.</p>
         </div>
       </div>
 
@@ -1621,7 +1795,7 @@ function renderTeacherExamCreator() {
         </label>
 
         <div class="builder-heading">
-          <h3>Perguntas e alternativas</h3>
+          <h3>Perguntas da prova</h3>
           <span>${state.teacherQuestions.length} ${state.teacherQuestions.length === 1 ? 'questão' : 'questões'}</span>
         </div>
 
@@ -1629,12 +1803,15 @@ function renderTeacherExamCreator() {
           ${state.teacherQuestions.map((item, index) => `
             <article class="question-builder-card">
               <div class="question-builder-number">${index + 1}</div>
+              ${renderQuestionTypeSelector(item, index, 'create')}
               <label class="exam-field">
                 <span>Pergunta</span>
                 <textarea required maxlength="5000" rows="3" placeholder="Digite a pergunta"
                   oninput="window.updateTeacherQuestion(${index}, 'prompt', this.value)">${escapeHtml(item.prompt)}</textarea>
               </label>
-              ${renderAlternativeBuilder(item, index, 'create')}
+              ${getExamQuestionType(item) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
+                ? renderZipAttachmentBuilder()
+                : renderAlternativeBuilder(item, index, 'create')}
               <button type="button" class="remove-question-btn" onclick="window.removeTeacherQuestion(${index})"
                 ${state.teacherQuestions.length === 1 ? 'disabled' : ''} aria-label="Remover questão ${index + 1}">Remover</button>
             </article>
@@ -1706,18 +1883,21 @@ function renderTeacherExamEditor(mainContent) {
   mainContent.innerHTML = `
     <section class="exam-page teacher-exam-editor">
       <div class="exam-page-heading">
-        <div><span class="eyebrow">Editar prova</span><h2>${escapeHtml(state.editingExamTitle)}</h2><p>Cadastre de 2 a 4 alternativas e marque uma delas como resposta correta.</p></div>
+        <div><span class="eyebrow">Editar prova</span><h2>${escapeHtml(state.editingExamTitle)}</h2><p>Edite o enunciado e escolha entre múltipla escolha ou entrega de arquivo ZIP.</p></div>
         <button class="secondary-btn" onclick="window.cancelExamEditing()">Cancelar edição</button>
       </div>
       <form class="exam-builder" onsubmit="window.submitExamUpdate(event)">
         <label class="exam-field"><span>Título da prova</span><input type="text" maxlength="120" required value="${escapeHtml(state.editingExamTitle)}" oninput="window.updateEditingExamTitle(this.value)" /></label>
-        <div class="builder-heading"><h3>Perguntas e alternativas</h3><span>${state.editingExamQuestions.length} ${state.editingExamQuestions.length === 1 ? 'questão' : 'questões'}</span></div>
+        <div class="builder-heading"><h3>Perguntas da prova</h3><span>${state.editingExamQuestions.length} ${state.editingExamQuestions.length === 1 ? 'questão' : 'questões'}</span></div>
         <div class="question-builder-list">
           ${state.editingExamQuestions.map((item, index) => `
             <article class="question-builder-card">
               <div class="question-builder-number">${index + 1}</div>
+              ${renderQuestionTypeSelector(item, index, 'edit')}
               <label class="exam-field"><span>Pergunta</span><textarea required maxlength="5000" rows="3" oninput="window.updateEditingExamQuestion(${index}, 'prompt', this.value)">${escapeHtml(item.prompt)}</textarea></label>
-              ${renderAlternativeBuilder(item, index, 'edit')}
+              ${getExamQuestionType(item) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
+                ? renderZipAttachmentBuilder()
+                : renderAlternativeBuilder(item, index, 'edit')}
               <button type="button" class="remove-question-btn" onclick="window.removeEditingExamQuestion(${index})" ${state.editingExamQuestions.length === 1 ? 'disabled' : ''}>Remover</button>
             </article>
           `).join('')}
@@ -1742,6 +1922,28 @@ async function loadTeacherExams() {
   if (state.currentView === 'teacher-exams') renderTeacherExamManager();
 }
 
+function renderTeacherResultGrade(result) {
+  if (result.manualReviewCount > 0) {
+    const automatic = result.autoGradedCount > 0
+      ? `<small>Objetivas: ${result.correctCount}/${result.autoGradedCount} · ${result.percentage}%</small>`
+      : '<small>Sem questões objetivas</small>';
+    return `<span class="grade-pill manual-review">Revisão manual</span>${automatic}`;
+  }
+  return `<span class="grade-pill">${result.correctCount}/${result.totalQuestions} · ${result.percentage}%</span>`;
+}
+
+function renderTeacherResultActions(result) {
+  const downloads = (result.attachments || []).map((attachment, index) => `
+    <button class="download-attachment-btn" onclick="window.downloadExamAttachment('${attachment.id}')">
+      Baixar ZIP${result.attachments.length > 1 ? ` ${index + 1}` : ''}
+    </button>
+  `).join('');
+  const missing = result.manualReviewCount > 0 && !result.attachments?.length
+    ? '<span class="attachment-missing-label">ZIP não entregue</span>'
+    : '';
+  return `${downloads}${missing}<button class="delete-result-log-btn" onclick="window.deleteExamResultLog('${result.id}')">Excluir log</button>`;
+}
+
 function renderTeacherResults() {
   const mainContent = document.getElementById('main-content');
   if (state.examResultsStatus === 'idle') {
@@ -1764,9 +1966,9 @@ function renderTeacherResults() {
                     <td><strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong><small>${escapeHtml(result.userEmail || '')}</small></td>
                     <td>${escapeHtml(result.examTitle || 'Prova')}</td>
                     <td>${formatExamTime(result.elapsedSeconds)}</td>
-                    <td><span class="grade-pill">${result.correctCount}/${result.totalQuestions} · ${result.percentage}%</span></td>
+                    <td>${renderTeacherResultGrade(result)}</td>
                     <td>${formatExamDate(result.submittedAtMillis)}</td>
-                    <td><button class="delete-result-log-btn" onclick="window.deleteExamResultLog('${result.id}')">Excluir log</button></td>
+                    <td><div class="result-action-list">${renderTeacherResultActions(result)}</div></td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -1893,6 +2095,42 @@ function renderExamInstructions(mainContent) {
   `;
 }
 
+function renderStudentZipAttachment(question, questionIndex) {
+  const attachment = state.examAttachments[question.id];
+  const upload = state.examAttachmentUploads[question.id];
+  const uploading = upload?.type === 'uploading';
+  const answerValue = state.examAnswers[questionIndex]?.value || '';
+  const hasAttachment = attachment?.status === 'ready' || Boolean(answerValue);
+  return `
+    <div class="student-zip-answer ${hasAttachment ? 'has-file' : ''}">
+      <div class="student-zip-heading">
+        <div>
+          <strong>${hasAttachment ? 'Arquivo ZIP anexado' : 'Anexe seu projeto em ZIP'}</strong>
+          <p>Somente <code>.zip</code>, até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}. Remova <code>node_modules</code>, builds e dependências antes de compactar.</p>
+        </div>
+        <span class="manual-review-pill">Revisão manual</span>
+      </div>
+      ${attachment?.status === 'ready' ? `
+        <div class="attached-file-summary">
+          <span class="attached-file-icon">ZIP</span>
+          <span><strong>${escapeHtml(attachment.fileName)}</strong><small>${formatAttachmentSize(attachment.size)}</small></span>
+        </div>
+      ` : ''}
+      <label class="zip-file-picker ${uploading ? 'disabled' : ''}">
+        <input type="file" accept=".zip,application/zip" ${uploading || state.examSubmitting ? 'disabled' : ''}
+          onchange="window.handleStudentZipUpload(${questionIndex}, this)" />
+        <span>${hasAttachment ? 'Substituir arquivo ZIP' : 'Selecionar e enviar ZIP'}</span>
+      </label>
+      <div class="zip-upload-progress-track" aria-hidden="true">
+        <span id="zip-upload-progress-${question.id}" style="width: ${upload?.progress || (attachment?.status === 'ready' ? 100 : 0)}%"></span>
+      </div>
+      <div id="zip-upload-status-${question.id}" class="zip-upload-status ${upload?.type || (attachment?.status === 'ready' ? 'success' : '')}" role="status">
+        ${escapeHtml(upload?.message || (attachment?.status === 'ready' ? 'Arquivo pronto para envio da prova.' : 'Nenhum arquivo selecionado.'))}
+      </div>
+    </div>
+  `;
+}
+
 function renderStudentExamOptions(question, questionIndex) {
   const selectedAnswer = state.examAnswers[questionIndex]?.value || '';
   return `
@@ -1927,9 +2165,11 @@ function renderActiveExam(mainContent) {
           <article class="student-question-card">
             <div class="student-question-number">Questão ${index + 1} de ${questions.length}</div>
             <h3>${escapeHtml(question.prompt)}</h3>
-            ${Array.isArray(question.options) && question.options.length >= 2
-              ? renderStudentExamOptions(question, index)
-              : `<label class="exam-field"><span>Sua resposta</span><textarea rows="4" maxlength="5000" placeholder="Digite sua resposta" oninput="window.updateStudentExamAnswer(${index}, this.value)">${escapeHtml(state.examAnswers[index]?.value || '')}</textarea></label>`}
+            ${getExamQuestionType(question) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
+              ? renderStudentZipAttachment(question, index)
+              : Array.isArray(question.options) && question.options.length >= 2
+                ? renderStudentExamOptions(question, index)
+                : `<label class="exam-field"><span>Sua resposta</span><textarea rows="4" maxlength="5000" placeholder="Digite sua resposta" oninput="window.updateStudentExamAnswer(${index}, this.value)">${escapeHtml(state.examAnswers[index]?.value || '')}</textarea></label>`}
           </article>
         `).join('')}
         ${state.examMessage ? `<div class="exam-alert error" role="alert">${escapeHtml(state.examMessage)}</div>` : ''}
@@ -1943,25 +2183,47 @@ function renderActiveExam(mainContent) {
 function renderExamResult(mainContent) {
   const result = state.examAttempt;
   const feedback = result.feedback || [];
+  const hasManualReview = result.manualReviewCount > 0;
+  const automaticSummary = result.autoGradedCount > 0
+    ? `Nas questões objetivas, você acertou <strong>${result.correctCount}</strong> de <strong>${result.autoGradedCount}</strong>.`
+    : 'Esta avaliação será analisada pelo professor.';
   mainContent.innerHTML = `
     <section class="exam-page exam-result-page">
-      <div class="exam-result-summary">
-        <span class="eyebrow">Prova corrigida</span>
+      <div class="exam-result-summary ${hasManualReview ? 'manual-review-summary' : ''}">
+        <span class="eyebrow">${hasManualReview ? 'Prova enviada' : 'Prova corrigida'}</span>
         <h2>${escapeHtml(state.exam.title)}</h2>
-        <div class="result-grade">${result.percentage}%</div>
-        <p>Você acertou <strong>${result.correctCount}</strong> de <strong>${result.totalQuestions}</strong> questões.</p>
+        ${hasManualReview
+          ? '<div class="result-grade manual">Em revisão</div>'
+          : `<div class="result-grade">${result.percentage}%</div>`}
+        <p>${hasManualReview
+          ? `${automaticSummary} ${result.manualReviewCount} resposta(s) com anexo aguardam revisão manual.`
+          : `Você acertou <strong>${result.correctCount}</strong> de <strong>${result.totalQuestions}</strong> questões.`}</p>
         <div class="result-meta"><span>Tempo total: <strong>${formatExamTime(result.elapsedSeconds)}</strong></span><span>Aluno: <strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong></span></div>
       </div>
       <div class="feedback-list">
         <h3>Feedback da avaliação</h3>
-        ${feedback.map((item, index) => `
-          <article class="feedback-card ${item.isCorrect ? 'correct' : 'incorrect'}">
-            <div class="feedback-status">${item.isCorrect ? '✓ Correta' : '✕ Incorreta'}</div>
-            <h4>${index + 1}. ${escapeHtml(item.prompt)}</h4>
-            <p><span>Sua resposta:</span> ${escapeHtml(item.studentAnswer || 'Não respondida')}</p>
-            ${item.isCorrect ? '' : '<p><span>Feedback:</span> Sua resposta não corresponde ao gabarito.</p>'}
-          </article>
-        `).join('')}
+        ${feedback.map((item, index) => {
+          if (item.requiresManualReview) {
+            const attachment = state.examAttachments[item.questionId];
+            return `
+              <article class="feedback-card manual-review">
+                <div class="feedback-status">◷ Aguardando revisão manual</div>
+                <h4>${index + 1}. ${escapeHtml(item.prompt)}</h4>
+                ${attachment?.status === 'ready'
+                  ? `<p><span>Arquivo entregue:</span> ${escapeHtml(attachment.fileName)} · ${formatAttachmentSize(attachment.size)}</p>`
+                  : '<p><span>Arquivo entregue:</span> nenhum anexo ZIP válido foi localizado.</p>'}
+              </article>
+            `;
+          }
+          return `
+            <article class="feedback-card ${item.isCorrect ? 'correct' : 'incorrect'}">
+              <div class="feedback-status">${item.isCorrect ? '✓ Correta' : '✕ Incorreta'}</div>
+              <h4>${index + 1}. ${escapeHtml(item.prompt)}</h4>
+              <p><span>Sua resposta:</span> ${escapeHtml(item.studentAnswer || 'Não respondida')}</p>
+              ${item.isCorrect ? '' : '<p><span>Feedback:</span> Sua resposta não corresponde ao gabarito.</p>'}
+            </article>
+          `;
+        }).join('')}
       </div>
     </section>
   `;
@@ -1973,6 +2235,10 @@ async function loadExamPortal() {
     state.exam = data.exam;
     state.examAttempt = data.attempt;
     state.examMessage = '';
+    state.examAttachmentUploads = {};
+    state.examAttachments = data.exam && data.attempt
+      ? await loadAttemptAttachments(data.exam, data.attempt.answers || [])
+      : {};
     if (!data.exam) {
       state.examScreen = 'empty';
     } else if (!data.attempt && data.exam.active !== true) {
@@ -2016,20 +2282,171 @@ function startExamCountdown() {
   }
 }
 
+function updateAttachmentUploadStatus(questionId, message, progress = null, type = '') {
+  state.examAttachmentUploads[questionId] = { message, progress, type };
+  const status = document.getElementById(`zip-upload-status-${questionId}`);
+  if (status) {
+    status.textContent = message;
+    status.className = `zip-upload-status ${type}`.trim();
+  }
+  const progressBar = document.getElementById(`zip-upload-progress-${questionId}`);
+  if (progressBar && progress !== null) progressBar.style.width = `${progress}%`;
+}
+
+async function deleteUnusedAttachment(metadata) {
+  if (!metadata?.id || metadata.status !== 'ready') return;
+  const attachmentRef = db.collection('examAttachments').doc(metadata.id);
+  for (let index = 0; index < metadata.chunkCount; index++) {
+    await attachmentRef.collection('chunks').doc(String(index)).delete();
+  }
+  await attachmentRef.delete();
+}
+
+async function uploadStudentZipAnswer(questionIndex, file) {
+  const question = state.exam?.questions?.[questionIndex];
+  if (!question || getExamQuestionType(question) !== EXAM_QUESTION_TYPES.ZIP_ATTACHMENT) {
+    throw new Error('Questão de anexo não encontrada.');
+  }
+  if (state.examAttempt?.status !== 'in_progress') {
+    throw new Error('Esta tentativa não aceita mais anexos.');
+  }
+
+  const descriptor = validateZipFileDescriptor(file);
+  updateAttachmentUploadStatus(question.id, 'Validando arquivo ZIP...', 3, 'uploading');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!hasZipFileSignature(bytes)) {
+    throw new Error('O conteúdo selecionado não corresponde a um arquivo ZIP válido.');
+  }
+
+  const chunks = splitAttachmentBytes(bytes);
+  const sha256 = await hashAttachmentBytes(bytes);
+  const attemptId = getExamAttemptId(state.exam.id, state.user.uid);
+  const previousAttachment = state.examAttachments[question.id] || null;
+  const previousAnswer = state.examAnswers[questionIndex] || { questionId: question.id, value: '' };
+  const activeAttachmentId = previousAttachment?.id || previousAnswer.value;
+  const targetSlot = activeAttachmentId?.endsWith('__a') ? 'b' : 'a';
+  const attachmentId = getExamAttachmentId(attemptId, question.id, targetSlot);
+  const attachmentRef = db.collection('examAttachments').doc(attachmentId);
+  const targetBeforeUpload = await attachmentRef.get();
+  const previousTargetChunkCount = targetBeforeUpload.exists
+    ? Number(targetBeforeUpload.data().chunkCount || 0)
+    : 0;
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  await attachmentRef.set({
+    attemptId,
+    examId: state.exam.id,
+    questionId: question.id,
+    questionIndex,
+    userId: state.user.uid,
+    fileName: descriptor.name,
+    contentType: 'application/zip',
+    size: descriptor.size,
+    chunkCount: chunks.length,
+    sha256,
+    status: 'uploading',
+    uploadedAt: serverTimestamp,
+    updatedAt: serverTimestamp
+  });
+
+  for (let index = chunks.length; index < previousTargetChunkCount; index++) {
+    await attachmentRef.collection('chunks').doc(String(index)).delete();
+  }
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index];
+    await attachmentRef.collection('chunks').doc(String(index)).set({
+      index,
+      size: chunk.length,
+      data: firebase.firestore.Blob.fromUint8Array(chunk),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    const progress = Math.round(((index + 1) / chunks.length) * 90) + 5;
+    updateAttachmentUploadStatus(
+      question.id,
+      `Enviando parte ${index + 1} de ${chunks.length}...`,
+      Math.min(progress, 95),
+      'uploading'
+    );
+  }
+
+  await attachmentRef.update({
+    status: 'ready',
+    uploadedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  const uploadedAttachment = {
+    id: attachmentId,
+    attemptId,
+    examId: state.exam.id,
+    questionId: question.id,
+    questionIndex,
+    userId: state.user.uid,
+    fileName: descriptor.name,
+    contentType: 'application/zip',
+    size: descriptor.size,
+    chunkCount: chunks.length,
+    sha256,
+    status: 'ready',
+    updatedAtMillis: Date.now()
+  };
+  state.examAttachments[question.id] = uploadedAttachment;
+  state.examAnswers[questionIndex] = { questionId: question.id, value: attachmentId };
+  const answerSaved = await saveCurrentExamAnswers();
+  if (!answerSaved) {
+    state.examAnswers[questionIndex] = previousAnswer;
+    if (previousAttachment) state.examAttachments[question.id] = previousAttachment;
+    else delete state.examAttachments[question.id];
+    throw new Error('O ZIP foi enviado, mas não foi possível vinculá-lo à tentativa. Tente novamente.');
+  }
+
+  if (previousAttachment?.id && previousAttachment.id !== uploadedAttachment.id) {
+    try {
+      await deleteUnusedAttachment(previousAttachment);
+    } catch (error) {
+      console.warn('Não foi possível limpar o anexo substituído:', error);
+    }
+  }
+  updateAttachmentUploadStatus(question.id, 'Arquivo ZIP enviado e vinculado à resposta.', 100, 'success');
+}
+
 async function saveCurrentExamAnswers() {
-  if (state.examScreen !== 'taking' || !state.exam?.id || state.examSubmitting) return;
+  if (state.examScreen !== 'taking' || !state.exam?.id || state.examSubmitting) return false;
   const status = document.getElementById('exam-save-status');
   if (status) status.textContent = 'Salvando respostas...';
   try {
     await callExamApi('saveExamAnswers', { examId: state.exam.id, answers: state.examAnswers });
     if (status) status.textContent = 'Respostas salvas automaticamente';
+    return true;
   } catch (error) {
     if (status) status.textContent = 'Não foi possível salvar agora; o envio final ainda será tentado.';
+    return false;
   }
+}
+
+function getPendingZipQuestions() {
+  return (state.exam?.questions || []).filter(question => {
+    if (getExamQuestionType(question) !== EXAM_QUESTION_TYPES.ZIP_ATTACHMENT) return false;
+    const attachment = state.examAttachments[question.id];
+    return attachment?.status !== 'ready';
+  });
 }
 
 async function submitCurrentExam(autoSubmitted = false) {
   if (state.examSubmitting || state.examScreen !== 'taking') return;
+  if (!autoSubmitted) {
+    const uploadInProgress = Object.values(state.examAttachmentUploads)
+      .some(upload => upload?.type === 'uploading');
+    if (uploadInProgress) {
+      state.examMessage = 'Aguarde o término do upload do arquivo ZIP antes de enviar a prova.';
+      renderExamPortal();
+      return;
+    }
+    const pendingZipQuestions = getPendingZipQuestions();
+    if (pendingZipQuestions.length) {
+      state.examMessage = `Anexe o arquivo ZIP solicitado em ${pendingZipQuestions.length} questão(ões) antes de enviar.`;
+      renderExamPortal();
+      return;
+    }
+  }
   if (autoSubmitted) state.examAutoSubmitAttempted = true;
   state.examSubmitting = true;
   state.examMessage = '';
@@ -2061,6 +2478,15 @@ window.updateTeacherExamTitle = value => {
 window.updateTeacherQuestion = (index, field, value) => {
   if (!state.teacherQuestions[index] || field !== 'prompt') return;
   state.teacherQuestions[index].prompt = value;
+};
+
+window.changeTeacherQuestionType = (index, type) => {
+  const current = state.teacherQuestions[index];
+  if (!current || getExamQuestionType(current) === type) return;
+  state.teacherQuestions[index] = type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
+    ? { ...createZipAttachmentDraft(), prompt: current.prompt || '' }
+    : { ...createMultipleChoiceDraft(), prompt: current.prompt || '' };
+  renderTeacherExamCreator();
 };
 
 window.updateTeacherOption = (questionIndex, optionIndex, value) => {
@@ -2139,6 +2565,15 @@ window.startEditingExam = async examId => {
   state.teacherExamsStatus = 'loading';
   renderTeacherExamManager();
   const questions = await Promise.all(exam.questions.map(async question => {
+    const type = getExamQuestionType(question);
+    if (type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT) {
+      return {
+        id: question.id,
+        ...createZipAttachmentDraft(),
+        prompt: question.prompt
+      };
+    }
+
     const options = Array.isArray(question.options) && question.options.length >= 2
       ? [...question.options]
       : ['', ''];
@@ -2148,7 +2583,13 @@ window.startEditingExam = async examId => {
       const matchedIndex = hashes.findIndex(hash => hash === question.answerHash);
       if (matchedIndex >= 0) correctOptionIndex = matchedIndex;
     }
-    return { id: question.id, prompt: question.prompt, options, correctOptionIndex };
+    return {
+      id: question.id,
+      type: EXAM_QUESTION_TYPES.MULTIPLE_CHOICE,
+      prompt: question.prompt,
+      options,
+      correctOptionIndex
+    };
   }));
   state.editingExamId = exam.id;
   state.editingExamTitle = exam.title;
@@ -2172,6 +2613,20 @@ window.updateEditingExamTitle = value => {
 window.updateEditingExamQuestion = (index, field, value) => {
   if (!state.editingExamQuestions[index] || field !== 'prompt') return;
   state.editingExamQuestions[index].prompt = value;
+};
+
+window.changeEditingExamQuestionType = (index, type) => {
+  const current = state.editingExamQuestions[index];
+  if (!current || getExamQuestionType(current) === type) return;
+  const draft = type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
+    ? createZipAttachmentDraft()
+    : createMultipleChoiceDraft();
+  state.editingExamQuestions[index] = {
+    id: current.id || null,
+    ...draft,
+    prompt: current.prompt || ''
+  };
+  renderTeacherExamManager();
 };
 
 window.updateEditingExamOption = (questionIndex, optionIndex, value) => {
@@ -2296,6 +2751,18 @@ window.deleteRegisteredExam = async examId => {
   renderTeacherExamManager();
 };
 
+window.downloadExamAttachment = async attachmentId => {
+  state.examResultsMessage = 'Preparando o download do arquivo ZIP...';
+  renderTeacherResults();
+  try {
+    const result = await callExamApi('downloadExamAttachment', { attachmentId });
+    state.examResultsMessage = `Download preparado: ${result.fileName}.`;
+  } catch (error) {
+    state.examResultsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível baixar o anexo ZIP.')}`;
+  }
+  renderTeacherResults();
+};
+
 window.deleteExamResultLog = async resultId => {
   const result = state.examResults.find(item => item.id === resultId);
   if (!result) return;
@@ -2384,6 +2851,8 @@ window.confirmExamStart = async () => {
     state.exam = data.exam;
     state.examAttempt = data.attempt;
     state.examAnswers = data.attempt.answers || [];
+    state.examAttachments = {};
+    state.examAttachmentUploads = {};
     state.examAutoSubmitAttempted = false;
     state.examScreen = 'taking';
   } catch (error) {
@@ -2391,6 +2860,24 @@ window.confirmExamStart = async () => {
     state.examScreen = 'instructions';
   }
   renderExamPortal();
+};
+
+window.handleStudentZipUpload = async (questionIndex, input) => {
+  const file = input?.files?.[0];
+  const question = state.exam?.questions?.[questionIndex];
+  if (!file || !question) return;
+  try {
+    await uploadStudentZipAnswer(questionIndex, file);
+  } catch (error) {
+    console.error('Erro ao enviar anexo ZIP:', error);
+    updateAttachmentUploadStatus(
+      question.id,
+      getFriendlyError(error, 'Não foi possível enviar o arquivo ZIP.'),
+      0,
+      'error'
+    );
+  }
+  if (state.currentView === 'exam' && state.examScreen === 'taking') renderExamPortal();
 };
 
 window.selectStudentExamOption = (questionIndex, optionIndex) => {

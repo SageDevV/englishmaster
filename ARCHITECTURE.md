@@ -89,6 +89,26 @@ O `nickname` e o `nicknameKey` também permanecem no topo de `users/{uid}` para 
 
 Submódulos internos acessam o perfil pelo estado carregado de `users/{uid}`. Um módulo hospedado em outro projeto, como o CodeScape atual, só poderá refletir esse cadastro quando for configurado para autenticar o mesmo usuário e ler o documento canônico no projeto `englishmaster-ea9b9`; não há compartilhamento de sessão ou `localStorage` entre origens diferentes.
 
+## Anexos ZIP nas avaliações
+
+Perguntas de prova aceitam dois tipos:
+
+- `multiple_choice`: correção automática por hash SHA-256, incluindo questões legadas sem `type` explícito.
+- `zip_attachment`: entrega de repositório/projeto em `.zip`, encaminhada para revisão manual.
+
+Como o projeto deve permanecer no Firebase Spark e não usa Cloud Storage, cada arquivo ZIP é limitado a **5 MB** e armazenado no Firestore em blocos binários de **640 KB**:
+
+```text
+examAttachments/{attemptId}__{questionId}__{a|b} # metadados, SHA-256 e status
+examAttachments/{attachmentId}/chunks/{0..7}    # conteúdo binário
+```
+
+O cliente valida extensão, assinatura `PK`, tamanho e SHA-256. Cada questão usa dois slots determinísticos (`a`/`b`): ao substituir um arquivo, o anterior permanece válido até o novo ZIP ficar completo e sua referência ser salva na tentativa; depois, as partes antigas são removidas para recuperar a cota. O download do professor reconstrói as partes e confirma tamanho, assinatura e hash antes de disponibilizar o arquivo. As regras permitem escrita somente pelo aluno proprietário, durante a tentativa ativa e apenas para uma questão `zip_attachment` presente no snapshot da prova. Após o envio da prova, anexos e partes ficam imutáveis.
+
+Questões ZIP não entram no denominador da nota automática. Provas mistas mostram a pontuação das questões objetivas e o status **Revisão manual**; provas compostas somente por anexos não exibem uma porcentagem automática.
+
+Para preservar a cota gratuita, os alunos devem excluir `node_modules`, artefatos de build e dependências antes de compactar o repositório.
+
 ## Compatibilidade
 
-Os dados, Firebase Auth, Firestore, progresso, ranking e avaliações permanecem no projeto `englishmaster-ea9b9`. O cadastro global usa apenas Auth e Firestore, permanecendo compatível com o Firebase Spark.
+Os dados, Firebase Auth, Firestore, progresso, ranking e avaliações permanecem no projeto `englishmaster-ea9b9`. O cadastro global e os anexos ZIP usam apenas Auth e Firestore, permanecendo compatíveis com o Firebase Spark.

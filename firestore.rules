@@ -88,6 +88,85 @@ service cloud.firestore {
         && changed.hasOnly(['logDeleted', 'logDeletedAt']);
     }
 
+    function validAttachmentMetadata(attachmentId) {
+      let data = request.resource.data;
+      let attempt = get(/databases/$(database)/documents/examAttempts/$(data.attemptId));
+      return data.keys().hasOnly([
+          'attemptId', 'examId', 'questionId', 'questionIndex', 'userId',
+          'fileName', 'contentType', 'size', 'chunkCount', 'sha256', 'status',
+          'uploadedAt', 'updatedAt'
+        ])
+        && data.userId == request.auth.uid
+        && data.attemptId == data.examId + '__' + request.auth.uid
+        && (attachmentId == data.attemptId + '__' + data.questionId + '__a'
+          || attachmentId == data.attemptId + '__' + data.questionId + '__b')
+        && data.questionIndex is int
+        && data.questionIndex >= 0
+        && data.questionIndex < attempt.data.examSnapshot.questions.size()
+        && attempt.data.examSnapshot.questions[data.questionIndex].id == data.questionId
+        && attempt.data.examSnapshot.questions[data.questionIndex].type == 'zip_attachment'
+        && attempt.data.userId == request.auth.uid
+        && attempt.data.examId == data.examId
+        && attempt.data.status == 'in_progress'
+        && request.time < attempt.data.startedAt + duration.value(2, 'h')
+        && data.fileName is string
+        && data.fileName.size() >= 5
+        && data.fileName.size() <= 255
+        && data.fileName.matches('.*[.][zZ][iI][pP]')
+        && data.contentType == 'application/zip'
+        && data.size is int
+        && data.size > 0
+        && data.size <= 5242880
+        && data.chunkCount is int
+        && data.chunkCount >= 1
+        && data.chunkCount <= 8
+        && data.sha256 is string
+        && data.sha256.matches('[0-9a-f]{64}')
+        && data.status in ['uploading', 'ready']
+        && data.uploadedAt is timestamp
+        && data.uploadedAt == request.time
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function validAttachmentChunk(attachmentId, chunkId) {
+      let attachment = get(/databases/$(database)/documents/examAttachments/$(attachmentId));
+      let attempt = get(/databases/$(database)/documents/examAttempts/$(attachment.data.attemptId));
+      let validChunkId = (chunkId == '0' && request.resource.data.index == 0)
+        || (chunkId == '1' && request.resource.data.index == 1)
+        || (chunkId == '2' && request.resource.data.index == 2)
+        || (chunkId == '3' && request.resource.data.index == 3)
+        || (chunkId == '4' && request.resource.data.index == 4)
+        || (chunkId == '5' && request.resource.data.index == 5)
+        || (chunkId == '6' && request.resource.data.index == 6)
+        || (chunkId == '7' && request.resource.data.index == 7);
+      return attachment.data.userId == request.auth.uid
+        && attachment.data.status == 'uploading'
+        && attempt.data.userId == request.auth.uid
+        && attempt.data.status == 'in_progress'
+        && request.time < attempt.data.startedAt + duration.value(2, 'h')
+        && request.resource.data.keys().hasOnly(['index', 'size', 'data', 'updatedAt'])
+        && request.resource.data.index is int
+        && request.resource.data.index >= 0
+        && request.resource.data.index < attachment.data.chunkCount
+        && validChunkId
+        && request.resource.data.data is bytes
+        && request.resource.data.size is int
+        && request.resource.data.size == request.resource.data.data.size()
+        && request.resource.data.size > 0
+        && request.resource.data.size <= 655360
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.updatedAt == request.time;
+    }
+
+    function canDeleteAttachment(data) {
+      let attempt = get(/databases/$(database)/documents/examAttempts/$(data.attemptId));
+      return data.userId == request.auth.uid
+        && attempt.data.userId == request.auth.uid
+        && attempt.data.status == 'in_progress'
+        && request.time < attempt.data.startedAt + duration.value(2, 'h');
+    }
+
     match /users/{userId} {
       allow read: if signedIn();
       allow create, update: if ownsUser(userId);
@@ -106,6 +185,28 @@ service cloud.firestore {
       allow read: if signedIn();
       allow create, update: if isAdmin();
       allow delete: if false;
+    }
+
+    match /examAttachments/{attachmentId} {
+      allow get: if signedIn()
+        && (isAdmin() || attachmentId.matches('.*__' + request.auth.uid + '__.*'));
+      allow list: if isAdmin();
+      allow create: if signedIn() && validAttachmentMetadata(attachmentId);
+      allow update: if signedIn()
+        && resource.data.userId == request.auth.uid
+        && validAttachmentMetadata(attachmentId);
+      allow delete: if signedIn() && canDeleteAttachment(resource.data);
+
+      match /chunks/{chunkId} {
+        allow get, list: if signedIn()
+          && (isAdmin()
+            || get(/databases/$(database)/documents/examAttachments/$(attachmentId)).data.userId == request.auth.uid);
+        allow create, update: if signedIn() && validAttachmentChunk(attachmentId, chunkId);
+        allow delete: if signedIn()
+          && canDeleteAttachment(
+            get(/databases/$(database)/documents/examAttachments/$(attachmentId)).data
+          );
+      }
     }
 
     match /examAttempts/{attemptId} {
