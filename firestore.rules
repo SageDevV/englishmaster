@@ -136,6 +136,79 @@ service cloud.firestore {
         && (validInProgressReview || validFinalReview);
     }
 
+
+    function validActivitySubmission(submissionId) {
+      let data = request.resource.data;
+      let activity = get(/databases/$(database)/documents/activities/$(data.activityId));
+      let profile = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      return data.keys().hasOnly([
+          'activityId', 'activityTitle', 'classId', 'className', 'subjectId', 'subjectName',
+          'userId', 'userEmail', 'studentName', 'fileName', 'contentType', 'size',
+          'chunkCount', 'sha256', 'status', 'submittedAt', 'updatedAt'
+        ])
+        && submissionId == data.activityId + '__' + request.auth.uid
+        && data.userId == request.auth.uid
+        && data.userEmail == request.auth.token.email
+        && data.activityTitle == activity.data.title
+        && data.classId == activity.data.classId
+        && data.className == activity.data.className
+        && data.subjectId == activity.data.subjectId
+        && data.subjectName == activity.data.subjectName
+        && activity.data.active == true
+        && activity.data.deleted == false
+        && ((profile.data.studentProfile.keys().hasAny(['classId'])
+              && profile.data.studentProfile.classId == activity.data.classId)
+          || (!(profile.data.studentProfile.keys().hasAny(['classId']))
+              && profile.data.studentProfile.className == activity.data.className))
+        && data.studentName is string
+        && data.studentName.size() >= 2
+        && data.studentName.size() <= 120
+        && data.fileName is string
+        && data.fileName.size() >= 5
+        && data.fileName.size() <= 255
+        && data.fileName.matches('.*[.][zZ][iI][pP]')
+        && data.contentType == 'application/zip'
+        && data.size is int
+        && data.size > 0
+        && data.size <= 5242880
+        && data.chunkCount is int
+        && data.chunkCount >= 1
+        && data.chunkCount <= 8
+        && data.sha256 is string
+        && data.sha256.matches('[0-9a-f]{64}')
+        && data.status in ['uploading', 'ready']
+        && data.submittedAt is timestamp
+        && data.submittedAt == request.time
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function validActivitySubmissionChunk(submissionId, chunkId) {
+      let submission = get(/databases/$(database)/documents/activitySubmissions/$(submissionId));
+      let validChunkId = (chunkId == '0' && request.resource.data.index == 0)
+        || (chunkId == '1' && request.resource.data.index == 1)
+        || (chunkId == '2' && request.resource.data.index == 2)
+        || (chunkId == '3' && request.resource.data.index == 3)
+        || (chunkId == '4' && request.resource.data.index == 4)
+        || (chunkId == '5' && request.resource.data.index == 5)
+        || (chunkId == '6' && request.resource.data.index == 6)
+        || (chunkId == '7' && request.resource.data.index == 7);
+      return submission.data.userId == request.auth.uid
+        && submission.data.status == 'uploading'
+        && request.resource.data.keys().hasOnly(['index', 'size', 'data', 'updatedAt'])
+        && request.resource.data.index is int
+        && request.resource.data.index >= 0
+        && request.resource.data.index < submission.data.chunkCount
+        && validChunkId
+        && request.resource.data.data is bytes
+        && request.resource.data.size is int
+        && request.resource.data.size == request.resource.data.data.size()
+        && request.resource.data.size > 0
+        && request.resource.data.size <= 655360
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.updatedAt == request.time;
+    }
+
     function validAttachmentMetadata(attachmentId) {
       let data = request.resource.data;
       let attempt = get(/databases/$(database)/documents/examAttempts/$(data.attemptId));
@@ -249,6 +322,38 @@ service cloud.firestore {
               && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.className == resource.data.className)));
       allow create, update: if isAdmin();
       allow delete: if false;
+    }
+
+
+    match /activities/{activityId} {
+      allow read: if isAdmin()
+        || (signedIn()
+          && resource.data.active == true
+          && resource.data.deleted == false
+          && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.classId == resource.data.classId)
+            || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.className == resource.data.className)));
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /activitySubmissions/{submissionId} {
+      allow get: if signedIn()
+        && (isAdmin() || submissionId.matches('.*__' + request.auth.uid));
+      allow list: if isAdmin();
+      allow create, update: if signedIn() && validActivitySubmission(submissionId);
+      allow delete: if false;
+
+      match /chunks/{chunkId} {
+        allow get, list: if signedIn()
+          && (isAdmin()
+            || get(/databases/$(database)/documents/activitySubmissions/$(submissionId)).data.userId == request.auth.uid);
+        allow create, update: if signedIn() && validActivitySubmissionChunk(submissionId, chunkId);
+        allow delete: if signedIn()
+          && get(/databases/$(database)/documents/activitySubmissions/$(submissionId)).data.userId == request.auth.uid
+          && get(/databases/$(database)/documents/activitySubmissions/$(submissionId)).data.status == 'uploading';
+      }
     }
 
     match /gameResults/{resultId} {

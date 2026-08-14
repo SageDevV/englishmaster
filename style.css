@@ -4568,3 +4568,150 @@ header > p {
   .essay-question-config { grid-template-columns: 1fr; }
   .essay-decision-actions { flex-direction: column; }
 }
+
+
+/* --- Cadastro e entrega de atividades ZIP --- */
+.activities-management-page,
+.student-activities-page {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.activity-builder {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.activity-builder .activity-instructions-field,
+.activity-builder .next-btn {
+  grid-column: 1 / -1;
+}
+
+.activity-builder .next-btn {
+  justify-self: start;
+  width: auto;
+}
+
+.teacher-activity-list,
+.student-activity-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.student-activity-grid {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 330px), 1fr));
+}
+
+.teacher-activity-card,
+.student-activity-card {
+  display: grid;
+  gap: 1rem;
+  padding: 1.2rem;
+  border: 1px solid var(--glass-border);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.activity-card-topline,
+.activity-card-actions,
+.activity-submission-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.activity-card-topline span {
+  color: #67e8f9;
+  font-size: 0.76rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.activity-card-topline small,
+.teacher-activity-card > p,
+.student-activity-delivery > p {
+  color: var(--text-muted);
+}
+
+.teacher-activity-card > p,
+.activity-instructions {
+  line-height: 1.65;
+  white-space: pre-wrap;
+}
+
+.activity-card-actions {
+  padding-top: 0.8rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.activity-card-actions strong {
+  color: #c4b5fd;
+}
+
+.activity-submission-list {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.activity-submission-row {
+  padding: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 0.7rem;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.activity-submission-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 0.2rem;
+}
+
+.activity-submission-row small,
+.activity-no-submissions {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+}
+
+.activity-submission-row span,
+.activity-submission-row strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.student-activity-delivery {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px dashed rgba(167, 139, 250, 0.4);
+  border-radius: 0.85rem;
+  background: rgba(139, 92, 246, 0.045);
+}
+
+.student-activity-delivery.delivered {
+  border-style: solid;
+  border-color: rgba(16, 185, 129, 0.42);
+  background: rgba(16, 185, 129, 0.045);
+}
+
+@media (max-width: 760px) {
+  .activity-builder { grid-template-columns: 1fr; }
+  .activity-builder .activity-instructions-field,
+  .activity-builder .next-btn { grid-column: auto; }
+  .activity-builder .next-btn { width: 100%; }
+  .activity-submission-row { align-items: stretch; flex-direction: column; }
+  .activity-submission-row .download-attachment-btn { width: 100%; }
+}
+
+
+.teacher-activity-card.archived {
+  opacity: 0.78;
+  border-style: dashed;
+}
+
+.activity-archived-label {
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  font-weight: 800;
+}

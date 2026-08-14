@@ -55,6 +55,7 @@ import {
   validateAcademicSelection,
   validateStudyReference
 } from './src/services/academicServices.js';
+import { validateActivity } from './src/services/activityServices.js';
 import {
   isStudentProfileComplete,
   splitStudentFullName,
@@ -369,6 +370,257 @@ async function loadStudyReferences() {
     state.referencesStatus = 'error';
     state.referencesMessage = getFriendlyError(error, 'Não foi possível carregar as referências.');
   }
+}
+
+
+function serializeActivityDocument(doc) {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    title: data.title,
+    instructions: data.instructions || '',
+    classId: data.classId || '',
+    className: data.className || '',
+    subjectId: data.subjectId || '',
+    subjectName: data.subjectName || '',
+    active: data.active === true,
+    deleted: data.deleted === true,
+    createdAtMillis: timestampToMillis(data.createdAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt),
+    submissions: [],
+    submission: null
+  };
+}
+
+function getActivitySubmissionId(activityId, userId) {
+  return `${activityId}__${userId}`;
+}
+
+function serializeActivitySubmission(doc) {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    activityId: data.activityId,
+    activityTitle: data.activityTitle || '',
+    classId: data.classId || '',
+    className: data.className || '',
+    subjectId: data.subjectId || '',
+    subjectName: data.subjectName || '',
+    userId: data.userId,
+    userEmail: data.userEmail || '',
+    studentName: data.studentName || '',
+    fileName: data.fileName || '',
+    contentType: data.contentType || 'application/zip',
+    size: Number(data.size || 0),
+    chunkCount: Number(data.chunkCount || 0),
+    sha256: data.sha256 || '',
+    status: data.status || 'uploading',
+    submittedAtMillis: timestampToMillis(data.submittedAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt)
+  };
+}
+
+async function loadActivities() {
+  if (!state.user) return;
+  state.activitiesStatus = 'loading';
+  try {
+    let query = db.collection('activities');
+    if (!isAdmin()) {
+      const classId = getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses);
+      if (!classId) {
+        state.activities = [];
+        state.activitiesStatus = 'ready';
+        return;
+      }
+      query = query
+        .where('classId', '==', classId)
+        .where('active', '==', true)
+        .where('deleted', '==', false);
+    }
+    const activitySnapshot = await query.get();
+    const activities = activitySnapshot.docs
+      .map(serializeActivityDocument)
+      .filter(activity => isAdmin() || (activity.active && !activity.deleted))
+      .sort((a, b) => (b.updatedAtMillis || b.createdAtMillis) - (a.updatedAtMillis || a.createdAtMillis));
+
+    if (isAdmin()) {
+      const submissionSnapshot = await db.collection('activitySubmissions').get();
+      const submissionsByActivity = new Map();
+      submissionSnapshot.docs
+        .map(serializeActivitySubmission)
+        .filter(submission => submission.status === 'ready')
+        .forEach(submission => {
+          const current = submissionsByActivity.get(submission.activityId) || [];
+          current.push(submission);
+          submissionsByActivity.set(submission.activityId, current);
+        });
+      activities.forEach(activity => {
+        activity.submissions = (submissionsByActivity.get(activity.id) || [])
+          .sort((a, b) => b.submittedAtMillis - a.submittedAtMillis);
+      });
+    } else {
+      const submissionDocs = await Promise.all(activities.map(activity =>
+        db.collection('activitySubmissions')
+          .doc(getActivitySubmissionId(activity.id, state.user.uid))
+          .get()
+      ));
+      activities.forEach((activity, index) => {
+        activity.submission = submissionDocs[index].exists
+          ? serializeActivitySubmission(submissionDocs[index])
+          : null;
+      });
+    }
+
+    state.activities = activities;
+    state.activitiesStatus = 'ready';
+  } catch (error) {
+    console.error('Erro ao carregar atividades:', error);
+    state.activities = [];
+    state.activitiesStatus = 'error';
+    state.activitiesMessage = getFriendlyError(error, 'Não foi possível carregar as atividades.');
+  }
+}
+
+async function createActivityOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const activity = validateActivity(data, state.academicClasses, state.academicSubjects);
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  const docRef = await db.collection('activities').add({
+    ...activity,
+    active: true,
+    deleted: false,
+    createdBy: state.user.uid,
+    createdByEmail: state.user.email || '',
+    createdAt: serverTimestamp,
+    updatedAt: serverTimestamp
+  });
+  return { ok: true, id: docRef.id };
+}
+
+async function archiveActivityOnFreeTier(activityId) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  await db.collection('activities').doc(String(activityId || '')).update({
+    active: false,
+    deleted: true,
+    archivedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true };
+}
+
+function updateActivityUploadStatus(activityId, message, progress = null, type = '') {
+  state.activityUploads[activityId] = { message, progress, type };
+  const status = document.getElementById(`activity-upload-status-${activityId}`);
+  if (status) {
+    status.textContent = message;
+    status.className = `zip-upload-status ${type}`.trim();
+  }
+  const progressBar = document.getElementById(`activity-upload-progress-${activityId}`);
+  if (progressBar && progress !== null) progressBar.style.width = `${progress}%`;
+}
+
+async function uploadActivitySubmission(activity, file) {
+  if (!activity?.id || activity.active !== true || activity.deleted === true) {
+    throw new Error('Esta atividade não está disponível para entrega.');
+  }
+  const descriptor = validateZipFileDescriptor(file);
+  updateActivityUploadStatus(activity.id, 'Validando arquivo ZIP...', 3, 'uploading');
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  if (!hasZipFileSignature(bytes)) {
+    throw new Error('O conteúdo selecionado não corresponde a um arquivo ZIP válido.');
+  }
+  const chunks = splitAttachmentBytes(bytes);
+  const sha256 = await hashAttachmentBytes(bytes);
+  const submissionId = getActivitySubmissionId(activity.id, state.user.uid);
+  const submissionRef = db.collection('activitySubmissions').doc(submissionId);
+  const previousDoc = await submissionRef.get();
+  const previousChunkCount = previousDoc.exists ? Number(previousDoc.data().chunkCount || 0) : 0;
+  const profile = state.userStats.studentProfile || {};
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  await submissionRef.set({
+    activityId: activity.id,
+    activityTitle: activity.title,
+    classId: activity.classId,
+    className: activity.className,
+    subjectId: activity.subjectId,
+    subjectName: activity.subjectName,
+    userId: state.user.uid,
+    userEmail: state.user.email || '',
+    studentName: profile.fullName || state.user.displayName || state.user.email || 'Aluno',
+    fileName: descriptor.name,
+    contentType: 'application/zip',
+    size: descriptor.size,
+    chunkCount: chunks.length,
+    sha256,
+    status: 'uploading',
+    submittedAt: serverTimestamp,
+    updatedAt: serverTimestamp
+  });
+
+  for (let index = chunks.length; index < previousChunkCount; index++) {
+    await submissionRef.collection('chunks').doc(String(index)).delete();
+  }
+  for (let index = 0; index < chunks.length; index++) {
+    const chunk = chunks[index];
+    await submissionRef.collection('chunks').doc(String(index)).set({
+      index,
+      size: chunk.length,
+      data: firebase.firestore.Blob.fromUint8Array(chunk),
+      updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+    });
+    const progress = Math.min(95, Math.round(((index + 1) / chunks.length) * 90) + 5);
+    updateActivityUploadStatus(
+      activity.id,
+      `Enviando parte ${index + 1} de ${chunks.length}...`,
+      progress,
+      'uploading'
+    );
+  }
+  await submissionRef.update({
+    status: 'ready',
+    submittedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  updateActivityUploadStatus(activity.id, 'Atividade encaminhada com sucesso.', 100, 'success');
+}
+
+async function downloadActivitySubmissionOnFreeTier(submissionId) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const submissionRef = db.collection('activitySubmissions').doc(String(submissionId || ''));
+  const submissionDoc = await submissionRef.get();
+  if (!submissionDoc.exists || submissionDoc.data().status !== 'ready') {
+    throw new Error('Entrega não encontrada ou ainda incompleta.');
+  }
+  const metadata = serializeActivitySubmission(submissionDoc);
+  const maxChunks = Math.ceil(MAX_ZIP_FILE_SIZE_BYTES / ATTACHMENT_CHUNK_SIZE_BYTES);
+  if (metadata.chunkCount < 1 || metadata.chunkCount > maxChunks) {
+    throw new Error('Quantidade de partes da entrega inválida.');
+  }
+  const chunkDocs = await Promise.all(Array.from({ length: metadata.chunkCount }, (_, index) =>
+    submissionRef.collection('chunks').doc(String(index)).get()
+  ));
+  if (chunkDocs.some(doc => !doc.exists)) throw new Error('A entrega está incompleta.');
+  const chunks = chunkDocs.map(doc => doc.data().data.toUint8Array());
+  const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (totalSize !== metadata.size) throw new Error('O tamanho da entrega não confere.');
+  const bytes = new Uint8Array(totalSize);
+  let offset = 0;
+  chunks.forEach(chunk => {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
+  });
+  if (!hasZipFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
+    throw new Error('A integridade da entrega ZIP não pôde ser confirmada.');
+  }
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = metadata.fileName || 'atividade.zip';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { ok: true, fileName: metadata.fileName };
 }
 
 function serializeExamDocument(doc) {
@@ -1235,6 +1487,14 @@ const state = {
   teacherReferenceUrl: '',
   teacherReferenceClassId: 'entra21',
   teacherReferenceSubjectId: '',
+  activities: [],
+  activitiesStatus: 'idle',
+  activitiesMessage: '',
+  activityUploads: {},
+  teacherActivityTitle: '',
+  teacherActivityInstructions: '',
+  teacherActivityClassId: 'entra21',
+  teacherActivitySubjectId: '',
   examSaveTimer: null,
   examSubmitting: false,
   examAutoSubmitAttempted: false,
@@ -1302,6 +1562,10 @@ auth.onAuthStateChanged(async (user) => {
       state.academicStatus = 'idle';
       state.studyReferences = [];
       state.referencesStatus = 'idle';
+      state.activities = [];
+      state.activitiesStatus = 'idle';
+      state.activitiesMessage = '';
+      state.activityUploads = {};
       state.teacherStudents = [];
       state.teacherStudentsStatus = 'idle';
       state.teacherStudentsMessage = '';
@@ -1700,10 +1964,12 @@ const viewRoutes = {
   'english-master': '#/english-master',
   'student-registration': '#/cadastro-do-aluno',
   'student-references': '#/referencias-de-estudo',
+  'student-activities': '#/atividades',
   exam: '#/prova',
   'teacher-academics': '#/professor/turmas-e-materias',
   'teacher-students': '#/professor/alunos-por-turma',
   'teacher-references': '#/professor/referencias-de-estudo',
+  'teacher-activities': '#/professor/atividades',
   'teacher-create': '#/professor/criacao-de-prova',
   'teacher-exams': '#/professor/provas-cadastradas',
   'teacher-results': '#/professor/resultados'
@@ -1717,10 +1983,12 @@ function getAuthorizedViewFromHash() {
     || requestedView === 'teacher-results'
     || requestedView === 'teacher-academics'
     || requestedView === 'teacher-students'
-    || requestedView === 'teacher-references';
+    || requestedView === 'teacher-references'
+    || requestedView === 'teacher-activities';
   const studentOnly = requestedView === 'exam'
     || requestedView === 'student-registration'
-    || requestedView === 'student-references';
+    || requestedView === 'student-references'
+    || requestedView === 'student-activities';
 
   if (teacherOnly && !isAdmin()) return 'hub';
   if (studentOnly && isAdmin()) return 'hub';
@@ -1743,6 +2011,11 @@ window.navigateTo = view => {
   if (view === 'teacher-references' || view === 'student-references') {
     state.referencesStatus = 'idle';
     state.referencesMessage = '';
+  }
+  if (view === 'teacher-activities' || view === 'student-activities') {
+    state.activitiesStatus = 'idle';
+    state.activitiesMessage = '';
+    state.activityUploads = {};
   }
   if (window.location.hash === route) {
     state.currentView = getAuthorizedViewFromHash();
@@ -1793,11 +2066,13 @@ function renderApp() {
   else if (state.currentView === 'english-master') renderEnglishMaster();
   else if (state.currentView === 'student-registration' && !isAdmin()) renderStudentRegistration();
   else if (state.currentView === 'student-references' && !isAdmin()) renderStudentReferences();
+  else if (state.currentView === 'student-activities' && !isAdmin()) renderStudentActivities();
   else if (state.currentView === 'quiz') renderQuiz();
   else if (state.currentView === 'exam' && !isAdmin()) renderExamPortal();
   else if (state.currentView === 'teacher-academics' && isAdmin()) renderTeacherAcademics();
   else if (state.currentView === 'teacher-students' && isAdmin()) renderTeacherStudents();
   else if (state.currentView === 'teacher-references' && isAdmin()) renderTeacherReferences();
+  else if (state.currentView === 'teacher-activities' && isAdmin()) renderTeacherActivities();
   else if (state.currentView === 'teacher-create' && isAdmin()) renderTeacherExamCreator();
   else if (state.currentView === 'teacher-exams' && isAdmin()) renderTeacherExamManager();
   else if (state.currentView === 'teacher-results' && isAdmin()) renderTeacherResults();
@@ -1931,6 +2206,13 @@ function renderHubHome() {
         description: 'Publique links e conteúdos de apoio para cada turma e matéria.'
       },
       {
+        view: 'teacher-activities',
+        icon: '⇧',
+        kicker: 'Entregas em ZIP',
+        title: 'Atividades',
+        description: 'Cadastre atividades por turma e matéria e acompanhe as entregas.'
+      },
+      {
         view: 'teacher-create',
         icon: '✦',
         kicker: 'Avaliações',
@@ -1967,6 +2249,13 @@ function renderHubHome() {
         kicker: 'Materiais de estudo',
         title: 'Referências de estudo',
         description: 'Consulte links e materiais publicados pelo professor para sua turma.'
+      },
+      {
+        view: 'student-activities',
+        icon: '⇧',
+        kicker: 'Entregas da turma',
+        title: 'Atividades',
+        description: 'Consulte as orientações e encaminhe sua atividade em arquivo ZIP.'
       },
       {
         view: 'exam',
@@ -2072,6 +2361,125 @@ function renderReferenceCards(references, admin = false) {
       </div>
     </article>
   `).join('')}</div>`;
+}
+
+
+function renderActivitySubmissionRows(submissions) {
+  if (!submissions.length) {
+    return '<div class="activity-no-submissions">Nenhuma entrega encaminhada até o momento.</div>';
+  }
+  return `<div class="activity-submission-list">${submissions.map(submission => `
+    <div class="activity-submission-row">
+      <div><strong>${escapeHtml(submission.studentName || 'Aluno')}</strong><small>${escapeHtml(submission.userEmail)}</small></div>
+      <div><span>${escapeHtml(submission.fileName)}</span><small>${formatAttachmentSize(submission.size)} · ${formatExamDate(submission.submittedAtMillis)}</small></div>
+      <button type="button" class="download-attachment-btn" onclick="window.downloadActivitySubmission('${submission.id}')">Baixar ZIP</button>
+    </div>
+  `).join('')}</div>`;
+}
+
+function renderTeacherActivities() {
+  const mainContent = document.getElementById('main-content');
+  if (state.activitiesStatus === 'idle') {
+    state.activitiesStatus = 'loading';
+    queueMicrotask(async () => {
+      await loadActivities();
+      if (state.currentView === 'teacher-activities') renderTeacherActivities();
+    });
+  }
+  const subjects = getSubjectsForClass(state.academicSubjects, state.teacherActivityClassId);
+  const canCreate = subjects.length > 0;
+  const activeActivityCount = state.activities.filter(activity => activity.active && !activity.deleted).length;
+  mainContent.innerHTML = `
+    <section class="exam-page activities-management-page">
+      <div class="exam-page-heading">
+        <div><span class="eyebrow">Entregas em ZIP</span><h2>Cadastro de atividades</h2><p>Publique orientações por turma e matéria e acompanhe os arquivos encaminhados.</p></div>
+        <button class="secondary-btn" onclick="window.navigateTo('hub')">Voltar ao Hub</button>
+      </div>
+      ${state.activitiesMessage ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
+      ${canCreate ? '' : '<div class="exam-alert error">Cadastre uma matéria para a turma selecionada antes de criar uma atividade.</div>'}
+      <form class="exam-builder activity-builder" onsubmit="window.submitActivity(event)">
+        <label class="exam-field"><span>Título da atividade</span><input name="title" minlength="3" maxlength="160" required value="${escapeHtml(state.teacherActivityTitle)}" oninput="window.updateActivityDraft('title', this.value)" placeholder="Ex.: Projeto final de JavaScript" /></label>
+        <label class="exam-field"><span>Turma</span><select name="classId" required onchange="window.updateActivityDraft('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.teacherActivityClassId, 'Selecione a turma')}</select></label>
+        <label class="exam-field"><span>Matéria</span><select name="subjectId" required onchange="window.updateActivityDraft('subjectId', this.value)">${renderAcademicOptions(subjects, state.teacherActivitySubjectId, 'Selecione a matéria')}</select></label>
+        <label class="exam-field activity-instructions-field"><span>Orientações</span><textarea name="instructions" maxlength="5000" rows="6" required oninput="window.updateActivityDraft('instructions', this.value)" placeholder="Descreva o que deve ser entregue e como preparar o arquivo ZIP">${escapeHtml(state.teacherActivityInstructions)}</textarea></label>
+        <button class="next-btn" type="submit" ${canCreate ? '' : 'disabled'}>Cadastrar atividade</button>
+      </form>
+      <div class="hub-section-heading"><div><span>Publicadas</span><h2>Atividades cadastradas</h2></div><small>${activeActivityCount} ativa(s) · ${state.activities.length} total</small></div>
+      ${state.activitiesStatus === 'loading'
+        ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando atividades...</p></div>'
+        : state.activities.length
+          ? `<div class="teacher-activity-list">${state.activities.map(activity => `
+              <article class="teacher-activity-card ${activity.deleted ? 'archived' : ''}">
+                <div class="activity-card-topline"><span>${escapeHtml(activity.subjectName)}</span><small>${escapeHtml(activity.className)} · ${activity.deleted ? 'Arquivada' : 'Ativa'}</small></div>
+                <h3>${escapeHtml(activity.title)}</h3>
+                <p>${escapeHtml(activity.instructions)}</p>
+                <div class="activity-card-actions"><strong>${activity.submissions.length} entrega(s)</strong>${activity.deleted ? '<span class="activity-archived-label">Somente consulta</span>' : `<button type="button" class="delete-exam-btn" onclick="window.archiveActivity('${activity.id}')">Arquivar</button>`}</div>
+                ${renderActivitySubmissionRows(activity.submissions)}
+              </article>
+            `).join('')}</div>`
+          : '<div class="exam-empty"><div class="empty-icon">⇧</div><h3>Nenhuma atividade cadastrada</h3><p>Use o formulário acima para publicar a primeira atividade.</p></div>'}
+    </section>
+  `;
+}
+
+function renderStudentActivityUpload(activity) {
+  const submission = activity.submission;
+  const upload = state.activityUploads[activity.id];
+  const uploading = upload?.type === 'uploading';
+  return `
+    <div class="student-activity-delivery ${submission?.status === 'ready' ? 'delivered' : ''}">
+      ${submission?.status === 'ready' ? `
+        <div class="attached-file-summary">
+          <span class="attached-file-icon">ZIP</span>
+          <span><strong>${escapeHtml(submission.fileName)}</strong><small>${formatAttachmentSize(submission.size)} · enviado em ${formatExamDate(submission.submittedAtMillis)}</small></span>
+        </div>
+      ` : '<p>Nenhuma entrega encaminhada.</p>'}
+      <label class="zip-file-picker ${uploading ? 'disabled' : ''}">
+        <input type="file" accept=".zip,application/zip" ${uploading ? 'disabled' : ''} onchange="window.handleActivityZipUpload('${activity.id}', this)" />
+        <span>${submission?.status === 'ready' ? 'Substituir arquivo ZIP' : 'Selecionar e encaminhar ZIP'}</span>
+      </label>
+      <div class="zip-upload-progress-track" aria-hidden="true"><span id="activity-upload-progress-${activity.id}" style="width: ${upload?.progress || (submission?.status === 'ready' ? 100 : 0)}%"></span></div>
+      <div id="activity-upload-status-${activity.id}" class="zip-upload-status ${upload?.type || (submission?.status === 'ready' ? 'success' : '')}" role="status">${escapeHtml(upload?.message || (submission?.status === 'ready' ? 'Atividade encaminhada. Você pode substituir o ZIP enquanto ela estiver ativa.' : 'Arquivo ZIP de até 5 MB.'))}</div>
+    </div>
+  `;
+}
+
+function renderStudentActivities() {
+  const mainContent = document.getElementById('main-content');
+  const profile = state.userStats.studentProfile || {};
+  const classId = getProfileClassId(profile, state.academicClasses);
+  if (!isStudentProfileComplete(profile) || !classId) {
+    mainContent.innerHTML = '<section class="exam-page"><div class="exam-empty"><div class="empty-icon">◉</div><h2>Complete seu cadastro</h2><p>Informe sua turma para visualizar e encaminhar atividades.</p><button class="next-btn" onclick="window.navigateTo(\'student-registration\')">Abrir cadastro</button></div></section>';
+    return;
+  }
+  if (state.activitiesStatus === 'idle') {
+    state.activitiesStatus = 'loading';
+    queueMicrotask(async () => {
+      await loadActivities();
+      if (state.currentView === 'student-activities') renderStudentActivities();
+    });
+  }
+  mainContent.innerHTML = `
+    <section class="exam-page student-activities-page">
+      <div class="exam-page-heading">
+        <div><span class="eyebrow">Turma ${escapeHtml(profile.className)}</span><h2>Encaminhamento de atividades</h2><p>Consulte as orientações e envie um arquivo ZIP. As atividades não possuem nota.</p></div>
+        <button class="secondary-btn" onclick="window.navigateTo('hub')">Voltar ao Hub</button>
+      </div>
+      ${state.activitiesMessage ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
+      ${state.activitiesStatus === 'loading'
+        ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando atividades...</p></div>'
+        : state.activities.length
+          ? `<div class="student-activity-grid">${state.activities.map(activity => `
+              <article class="student-activity-card">
+                <div class="activity-card-topline"><span>${escapeHtml(activity.subjectName)}</span><small>${escapeHtml(activity.className)}</small></div>
+                <h3>${escapeHtml(activity.title)}</h3>
+                <div class="activity-instructions">${escapeHtml(activity.instructions)}</div>
+                ${renderStudentActivityUpload(activity)}
+              </article>
+            `).join('')}</div>`
+          : '<div class="exam-empty"><div class="empty-icon">⇧</div><h3>Nenhuma atividade disponível</h3><p>O professor ainda não publicou atividades para sua turma.</p></div>'}
+    </section>
+  `;
 }
 
 function renderTeacherReferences() {
@@ -4041,6 +4449,96 @@ window.archiveStudyReference = async referenceId => {
   renderTeacherReferences();
 };
 
+
+window.updateActivityDraft = (field, value) => {
+  const fields = {
+    title: 'teacherActivityTitle',
+    instructions: 'teacherActivityInstructions',
+    classId: 'teacherActivityClassId',
+    subjectId: 'teacherActivitySubjectId'
+  };
+  if (!fields[field]) return;
+  state[fields[field]] = value;
+  if (field === 'classId') {
+    const subjects = getSubjectsForClass(state.academicSubjects, value);
+    if (!subjects.some(subject => subject.id === state.teacherActivitySubjectId)) {
+      state.teacherActivitySubjectId = '';
+    }
+    renderTeacherActivities();
+  }
+};
+
+window.submitActivity = async event => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  state.activitiesMessage = '';
+  try {
+    await createActivityOnFreeTier({
+      title: state.teacherActivityTitle,
+      instructions: state.teacherActivityInstructions,
+      classId: state.teacherActivityClassId,
+      subjectId: state.teacherActivitySubjectId
+    });
+    state.teacherActivityTitle = '';
+    state.teacherActivityInstructions = '';
+    state.activitiesMessage = 'Atividade cadastrada com sucesso.';
+    await loadActivities();
+  } catch (error) {
+    state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível cadastrar a atividade.')}`;
+  }
+  renderTeacherActivities();
+};
+
+window.archiveActivity = async activityId => {
+  if (!window.confirm('Arquivar esta atividade? Ela deixará de aceitar novas entregas, mas os arquivos recebidos serão preservados.')) return;
+  state.activitiesMessage = '';
+  try {
+    await archiveActivityOnFreeTier(activityId);
+    state.activitiesMessage = 'Atividade arquivada com sucesso. As entregas foram preservadas.';
+    await loadActivities();
+  } catch (error) {
+    state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível arquivar a atividade.')}`;
+  }
+  renderTeacherActivities();
+};
+
+window.handleActivityZipUpload = async (activityId, input) => {
+  const file = input?.files?.[0];
+  const activity = state.activities.find(item => item.id === activityId);
+  if (!file || !activity) return;
+  try {
+    await uploadActivitySubmission(activity, file);
+    state.activitiesMessage = 'Atividade encaminhada com sucesso.';
+    await loadActivities();
+  } catch (error) {
+    console.error('Erro ao encaminhar atividade:', error);
+    updateActivityUploadStatus(activityId, getFriendlyError(error, 'Não foi possível encaminhar o ZIP.'), 0, 'error');
+    state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível encaminhar o ZIP.')}`;
+  }
+  if (state.currentView === 'student-activities') renderStudentActivities();
+};
+
+window.downloadActivitySubmission = async submissionId => {
+  state.activitiesMessage = 'Preparando o download da entrega...';
+  renderTeacherActivities();
+  try {
+    const result = await downloadActivitySubmissionOnFreeTier(submissionId);
+    state.activitiesMessage = `Download preparado: ${result.fileName}.`;
+  } catch (error) {
+    state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível baixar a entrega.')}`;
+  }
+  renderTeacherActivities();
+};
+
+window.refreshActivities = async () => {
+  state.activitiesStatus = 'loading';
+  state.activitiesMessage = '';
+  await loadActivities();
+  if (isAdmin()) renderTeacherActivities();
+  else renderStudentActivities();
+};
+
 window.submitStudentRegistration = async event => {
   event.preventDefault();
   const form = event.currentTarget;
@@ -4071,6 +4569,8 @@ window.submitStudentRegistration = async event => {
     state.studentExamsStatus = 'idle';
     state.studyReferences = [];
     state.referencesStatus = 'idle';
+    state.activities = [];
+    state.activitiesStatus = 'idle';
     await loadAcademicCatalog();
   }
   updateHeader();

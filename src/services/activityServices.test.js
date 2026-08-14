@@ -1,0 +1,48 @@
+import { describe, it } from 'node:test';
+import assert from 'node:assert/strict';
+import { DEFAULT_ACADEMIC_CLASSES } from './academicServices.js';
+import {
+  MAX_ACTIVITY_INSTRUCTIONS_LENGTH,
+  validateActivity
+} from './activityServices.js';
+
+const subjects = [{
+  id: 'subject-1',
+  name: 'Desenvolvimento Web',
+  classId: 'entra21',
+  className: 'Entra21',
+  active: true
+}];
+
+describe('activity validation', () => {
+  it('normalizes and links an activity to its class and subject', () => {
+    const activity = validateActivity({
+      title: '  Projeto   final ',
+      instructions: 'Compacte o repositório e envie em ZIP.',
+      classId: 'entra21',
+      subjectId: 'subject-1'
+    }, DEFAULT_ACADEMIC_CLASSES, subjects);
+    assert.equal(activity.title, 'Projeto final');
+    assert.equal(activity.className, 'Entra21');
+    assert.equal(activity.subjectName, 'Desenvolvimento Web');
+  });
+
+  it('requires title, instructions and a subject from the selected class', () => {
+    assert.throws(
+      () => validateActivity({ title: 'A', instructions: 'Faça.', classId: 'entra21', subjectId: 'subject-1' }, DEFAULT_ACADEMIC_CLASSES, subjects),
+      /título da atividade/
+    );
+    assert.throws(
+      () => validateActivity({ title: 'Projeto', instructions: '', classId: 'entra21', subjectId: 'subject-1' }, DEFAULT_ACADEMIC_CLASSES, subjects),
+      /orientações/
+    );
+    assert.throws(
+      () => validateActivity({ title: 'Projeto', instructions: 'x'.repeat(MAX_ACTIVITY_INSTRUCTIONS_LENGTH + 1), classId: 'entra21', subjectId: 'subject-1' }, DEFAULT_ACADEMIC_CLASSES, subjects),
+      /no máximo/
+    );
+    assert.throws(
+      () => validateActivity({ title: 'Projeto', instructions: 'Faça.', classId: 'jovemprogramador', subjectId: 'subject-1' }, DEFAULT_ACADEMIC_CLASSES, subjects),
+      /não pertence à turma/
+    );
+  });
+});
