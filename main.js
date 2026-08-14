@@ -966,7 +966,8 @@ function addXP(amount) {
 
 // --- Application Routes ---
 const viewRoutes = {
-  home: '#/',
+  hub: '#/',
+  'english-master': '#/english-master',
   exam: '#/prova',
   'teacher-create': '#/professor/criacao-de-prova',
   'teacher-exams': '#/professor/provas-cadastradas',
@@ -975,18 +976,18 @@ const viewRoutes = {
 
 function getAuthorizedViewFromHash() {
   const route = window.location.hash || '#/';
-  const requestedView = Object.entries(viewRoutes).find(([, hash]) => hash === route)?.[0] || 'home';
+  const requestedView = Object.entries(viewRoutes).find(([, hash]) => hash === route)?.[0] || 'hub';
   const teacherOnly = requestedView === 'teacher-create'
     || requestedView === 'teacher-exams'
     || requestedView === 'teacher-results';
 
-  if (teacherOnly && !isAdmin()) return 'home';
-  if (requestedView === 'exam' && isAdmin()) return 'home';
+  if (teacherOnly && !isAdmin()) return 'hub';
+  if (requestedView === 'exam' && isAdmin()) return 'hub';
   return requestedView;
 }
 
 window.navigateTo = view => {
-  const route = viewRoutes[view] || viewRoutes.home;
+  const route = viewRoutes[view] || viewRoutes.hub;
   if (view === 'exam') state.examScreen = 'idle';
   if (view === 'teacher-exams') state.teacherExamsStatus = 'idle';
   if (view === 'teacher-results') state.examResultsStatus = 'idle';
@@ -1011,22 +1012,40 @@ window.addEventListener('hashchange', () => {
 });
 
 // --- UI Rendering ---
+function isEnglishMasterView() {
+  return state.currentView === 'english-master' || state.currentView === 'quiz';
+}
+
+function applyViewTheme() {
+  const englishMasterActive = isEnglishMasterView();
+  document.body.dataset.module = englishMasterActive ? 'english-master' : 'hub';
+  document.title = englishMasterActive ? 'English Master | Magister Hub' : 'Magister Hub | Hub do Professor';
+  const subtitle = document.querySelector('header > p');
+  if (subtitle) {
+    subtitle.textContent = englishMasterActive
+      ? 'English Master · Aprendizado interativo de inglês'
+      : 'Magister Hub · O hub de ferramentas do professor';
+  }
+}
+
 function renderApp() {
+  applyViewTheme();
   if (!state.user) {
     renderLogin();
     return;
   }
 
   updateHeader();
-  if (state.currentView === 'home') renderHome();
+  if (state.currentView === 'hub') renderHubHome();
+  else if (state.currentView === 'english-master') renderEnglishMaster();
   else if (state.currentView === 'quiz') renderQuiz();
   else if (state.currentView === 'exam' && !isAdmin()) renderExamPortal();
   else if (state.currentView === 'teacher-create' && isAdmin()) renderTeacherExamCreator();
   else if (state.currentView === 'teacher-exams' && isAdmin()) renderTeacherExamManager();
   else if (state.currentView === 'teacher-results' && isAdmin()) renderTeacherResults();
   else {
-    state.currentView = 'home';
-    renderHome();
+    state.currentView = 'hub';
+    renderHubHome();
   }
 }
 
@@ -1039,8 +1058,8 @@ function renderLogin() {
   mainContent.innerHTML = `
     <div class="login-screen">
       <div class="login-card">
-        <h2>Bem-vindo!</h2>
-        <p>Para começar sua jornada no inglês, faça login com sua conta Google.</p>
+        <h2>Bem-vindo ao Magister Hub</h2>
+        <p>Entre com sua conta Google para acessar seus módulos e ferramentas.</p>
         <button class="next-btn" onclick="window.loginWithGoogle()">
           Fazer Login com Google
         </button>
@@ -1066,6 +1085,11 @@ function updateHeader() {
   const xpPercent = Math.min(100, (state.userStats.xp / XP_PER_LEVEL) * 100);
 
   headerTop.innerHTML = `
+    <button class="hub-brand" onclick="window.navigateTo('hub')" aria-label="Ir para o Magister Hub">
+      <span class="hub-brand-mark">MH</span>
+      <span class="hub-brand-copy"><strong>Magister Hub</strong><small>Hub do professor</small></span>
+    </button>
+
     <div class="user-profile">
       ${photoURL ? `<img src="${escapeHtml(photoURL)}" class="user-avatar" alt="Profile">` : '<div class="user-avatar avatar-fallback">A</div>'}
       <div class="user-profile-copy">
@@ -1079,7 +1103,8 @@ function updateHeader() {
     </div>
 
     <nav class="app-nav" aria-label="Navegação principal">
-      <button class="nav-btn ${state.currentView === 'home' ? 'active' : ''}" onclick="window.navigateTo('home')">Início</button>
+      <button class="nav-btn ${state.currentView === 'hub' ? 'active' : ''}" onclick="window.navigateTo('hub')">Hub</button>
+      <button class="nav-btn ${isEnglishMasterView() ? 'active' : ''}" onclick="window.navigateTo('english-master')">English Master</button>
       ${isAdmin() ? `
         <button class="nav-btn ${state.currentView === 'teacher-create' ? 'active' : ''}" onclick="window.navigateTo('teacher-create')">Criação de Prova</button>
         <button class="nav-btn ${state.currentView === 'teacher-exams' ? 'active' : ''}" onclick="window.navigateTo('teacher-exams')">Provas cadastradas</button>
@@ -1099,15 +1124,106 @@ function updateHeader() {
   `;
 }
 
-function renderHome() {
-  state.currentView = 'home';
+function renderHubModuleCard(module) {
+  return `
+    <button class="hub-module-card ${module.featured ? 'featured' : ''}" onclick="window.navigateTo('${module.view}')">
+      <span class="hub-module-icon" aria-hidden="true">${module.icon}</span>
+      <span class="hub-module-content">
+        <span class="hub-module-kicker">${escapeHtml(module.kicker)}</span>
+        <strong>${escapeHtml(module.title)}</strong>
+        <small>${escapeHtml(module.description)}</small>
+      </span>
+      <span class="hub-module-arrow" aria-hidden="true">→</span>
+    </button>
+  `;
+}
+
+function renderHubHome() {
+  state.currentView = 'hub';
+  const mainContent = document.getElementById('main-content');
+  const modules = [
+    {
+      view: 'english-master',
+      icon: '🌐',
+      kicker: 'Submódulo de aprendizagem',
+      title: 'English Master',
+      description: 'Trilhas, quizzes, ranking e desafios para praticar inglês.',
+      featured: true
+    },
+    ...(isAdmin() ? [
+      {
+        view: 'teacher-create',
+        icon: '✦',
+        kicker: 'Avaliações',
+        title: 'Criar prova',
+        description: 'Monte avaliações de múltipla escolha e publique para os alunos.'
+      },
+      {
+        view: 'teacher-exams',
+        icon: '▣',
+        kicker: 'Gestão',
+        title: 'Provas cadastradas',
+        description: 'Edite, ative, desative ou remova avaliações existentes.'
+      },
+      {
+        view: 'teacher-results',
+        icon: '◫',
+        kicker: 'Acompanhamento',
+        title: 'Resultados',
+        description: 'Consulte notas, alunos e tempo de realização das provas.'
+      }
+    ] : [
+      {
+        view: 'exam',
+        icon: state.examScreen === 'locked' ? '🔒' : '✓',
+        kicker: 'Avaliação',
+        title: 'Prova',
+        description: state.examScreen === 'locked'
+          ? 'A avaliação está cadastrada e aguarda liberação do professor.'
+          : 'Acesse a avaliação disponibilizada pelo professor.'
+      }
+    ])
+  ];
+
+  mainContent.innerHTML = `
+    <section class="hub-dashboard">
+      <div class="hub-hero">
+        <div class="hub-hero-copy">
+          <span class="hub-eyebrow">MAGISTER HUB</span>
+          <h1>Um único lugar para ensinar, avaliar e acompanhar.</h1>
+          <p>Escolha um módulo para continuar. Novas ferramentas educacionais poderão ser adicionadas ao Hub sem alterar os submódulos existentes.</p>
+          <div class="hub-role-pill">${isAdmin() ? 'Perfil do professor' : 'Perfil do aluno'}</div>
+        </div>
+        <div class="hub-hero-orbit" aria-hidden="true">
+          <span class="orbit-core">M</span>
+          <span class="orbit-dot dot-one"></span>
+          <span class="orbit-dot dot-two"></span>
+          <span class="orbit-dot dot-three"></span>
+        </div>
+      </div>
+
+      <div class="hub-section-heading">
+        <div><span>Módulos disponíveis</span><h2>Seu espaço de trabalho</h2></div>
+        <small>${modules.length} ${modules.length === 1 ? 'módulo' : 'módulos'}</small>
+      </div>
+      <div class="hub-modules-grid">${modules.map(renderHubModuleCard).join('')}</div>
+    </section>
+  `;
+}
+
+function renderEnglishMaster() {
+  state.currentView = 'english-master';
   const mainContent = document.getElementById('main-content');
 
   const totalQuestions = allQuestionData.length;
   const progressPercent = Math.min(100, (state.userStats.totalCorrect / totalQuestions * 100).toFixed(0));
 
   mainContent.innerHTML = `
-    <div class="home-container">
+    <div class="home-container english-master-module">
+      <div class="english-module-header">
+        <div><span class="english-module-kicker">MAGISTER HUB / SUBMÓDULO</span><h1>English Master</h1><p>Aprenda inglês para tecnologia com prática, desafios e evolução contínua.</p></div>
+        <button class="module-back-btn" onclick="window.navigateTo('hub')">← Voltar ao Hub</button>
+      </div>
       <div class="gamification-row">
         <div class="stat-card">
           <div class="stat-icon">🔥</div>
@@ -2400,17 +2516,17 @@ window.submitNickname = async (event) => {
   setNicknameFeedback('Nickname salvo.', 'success');
   window.closeNicknameModal();
   updateHeader();
-  if (state.currentView === 'home') renderHome();
+  if (state.currentView === 'english-master') renderEnglishMaster();
 };
 
 window.setAnswerMode = (mode) => {
   state.answerMode = mode === 'written' ? 'written' : 'multiple';
-  renderHome();
+  renderEnglishMaster();
 };
 
 window.refreshLeaderboard = async () => {
   await loadLeaderboardFromFirestore();
-  renderHome();
+  renderEnglishMaster();
 };
 
 window.startQuiz = (topicId, difficulty) => {
@@ -2535,10 +2651,11 @@ function updateTimerDisplay() {
 
 window.goHome = async () => {
   stopTimer();
-  state.currentView = 'home';
+  state.currentView = 'english-master';
   state.isSurvivor = false;
   state.isSpeedrun = false;
   state.speedrunStartedAt = 0;
+  window.history.replaceState(null, '', viewRoutes['english-master']);
   await loadLeaderboardFromFirestore();
   renderApp();
 };
