@@ -53,6 +53,11 @@ import {
   splitStudentFullName,
   validateStudentProfile
 } from './src/services/studentProfileServices.js';
+import {
+  buildTeacherStudentGroups,
+  filterTeacherResults,
+  getTeacherResultFilterOptions
+} from './src/services/teacherDashboardServices.js';
 
 // --- Firebase Configuration ---
 const firebaseConfig = {
@@ -882,7 +887,10 @@ async function listExamResultsOnFreeTier() {
       id: item.id,
       examId: item.examId,
       examTitle: item.examTitle,
+      userId: item.userId || '',
+      classId: exam.classId || '',
       className: exam.className || '',
+      subjectId: exam.subjectId || '',
       subjectName: exam.subjectName || '',
       firstName: item.firstName,
       lastName: item.lastName,
@@ -1097,6 +1105,14 @@ const state = {
   examResults: [],
   examResultsStatus: 'idle',
   examResultsMessage: '',
+  examResultFilters: {
+    classKey: '',
+    subjectKey: '',
+    studentKey: ''
+  },
+  teacherStudents: [],
+  teacherStudentsStatus: 'idle',
+  teacherStudentsMessage: '',
   teacherExams: [],
   teacherExamsStatus: 'idle',
   teacherExamsMessage: '',
@@ -1141,6 +1157,12 @@ auth.onAuthStateChanged(async (user) => {
       state.academicStatus = 'idle';
       state.studyReferences = [];
       state.referencesStatus = 'idle';
+      state.teacherStudents = [];
+      state.teacherStudentsStatus = 'idle';
+      state.teacherStudentsMessage = '';
+      state.examResults = [];
+      state.examResultsStatus = 'idle';
+      state.examResultFilters = { classKey: '', subjectKey: '', studentKey: '' };
       state.studentExams = [];
       state.studentExamsStatus = 'idle';
       state.selectedExamId = null;
@@ -1535,6 +1557,7 @@ const viewRoutes = {
   'student-references': '#/referencias-de-estudo',
   exam: '#/prova',
   'teacher-academics': '#/professor/turmas-e-materias',
+  'teacher-students': '#/professor/alunos-por-turma',
   'teacher-references': '#/professor/referencias-de-estudo',
   'teacher-create': '#/professor/criacao-de-prova',
   'teacher-exams': '#/professor/provas-cadastradas',
@@ -1548,6 +1571,7 @@ function getAuthorizedViewFromHash() {
     || requestedView === 'teacher-exams'
     || requestedView === 'teacher-results'
     || requestedView === 'teacher-academics'
+    || requestedView === 'teacher-students'
     || requestedView === 'teacher-references';
   const studentOnly = requestedView === 'exam'
     || requestedView === 'student-registration'
@@ -1569,6 +1593,7 @@ window.navigateTo = view => {
     state.examAttachmentUploads = {};
   }
   if (view === 'teacher-exams') state.teacherExamsStatus = 'idle';
+  if (view === 'teacher-students') state.teacherStudentsStatus = 'idle';
   if (view === 'teacher-results') state.examResultsStatus = 'idle';
   if (view === 'teacher-references' || view === 'student-references') {
     state.referencesStatus = 'idle';
@@ -1626,6 +1651,7 @@ function renderApp() {
   else if (state.currentView === 'quiz') renderQuiz();
   else if (state.currentView === 'exam' && !isAdmin()) renderExamPortal();
   else if (state.currentView === 'teacher-academics' && isAdmin()) renderTeacherAcademics();
+  else if (state.currentView === 'teacher-students' && isAdmin()) renderTeacherStudents();
   else if (state.currentView === 'teacher-references' && isAdmin()) renderTeacherReferences();
   else if (state.currentView === 'teacher-create' && isAdmin()) renderTeacherExamCreator();
   else if (state.currentView === 'teacher-exams' && isAdmin()) renderTeacherExamManager();
@@ -1744,6 +1770,13 @@ function renderHubHome() {
         kicker: 'Organização acadêmica',
         title: 'Turmas e matérias',
         description: 'Cadastre as turmas e matérias utilizadas em provas e materiais.'
+      },
+      {
+        view: 'teacher-students',
+        icon: '◉',
+        kicker: 'Perfis dos alunos',
+        title: 'Alunos por turma',
+        description: 'Consulte os dados preenchidos pelos alunos, organizados por turma.'
       },
       {
         view: 'teacher-references',
@@ -2457,6 +2490,102 @@ async function loadTeacherExams() {
   if (state.currentView === 'teacher-exams') renderTeacherExamManager();
 }
 
+function renderTeacherStudentCard(student) {
+  const initial = escapeHtml(student.fullName.charAt(0).toUpperCase() || 'A');
+  const updatedLabel = student.updatedAtMillis
+    ? formatExamDate(student.updatedAtMillis)
+    : 'Data não informada';
+  return `
+    <article class="teacher-student-card">
+      <div class="teacher-student-identity">
+        <span class="teacher-student-avatar" aria-hidden="true">${initial}</span>
+        <div>
+          <h3>${escapeHtml(student.fullName)}</h3>
+          <span>${student.nickname ? `@${escapeHtml(student.nickname)}` : 'Nickname não informado'}</span>
+        </div>
+      </div>
+      <dl class="teacher-student-details">
+        <div><dt>E-mail</dt><dd>${escapeHtml(student.email || 'Não informado')}</dd></div>
+        <div><dt>Objetivo com o curso</dt><dd>${escapeHtml(student.courseGoal || 'Não informado')}</dd></div>
+        <div><dt>Cadastro atualizado</dt><dd>${escapeHtml(updatedLabel)}</dd></div>
+      </dl>
+    </article>
+  `;
+}
+
+function renderTeacherStudents() {
+  const mainContent = document.getElementById('main-content');
+  if (state.teacherStudentsStatus === 'idle') {
+    state.teacherStudentsStatus = 'loading';
+    queueMicrotask(loadTeacherStudents);
+  }
+
+  const groups = buildTeacherStudentGroups(state.teacherStudents, state.academicClasses);
+  const studentCount = groups.reduce((total, group) => total + group.students.length, 0);
+  const content = state.teacherStudentsStatus === 'loading'
+    ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando alunos...</p></div>'
+    : state.teacherStudentsStatus === 'error'
+      ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.teacherStudentsMessage)}</p><button class="next-btn" onclick="window.refreshTeacherStudents()">Tentar novamente</button></div>`
+      : groups.length
+        ? `<div class="teacher-student-groups">${groups.map(group => `
+            <section class="teacher-class-group">
+              <div class="teacher-class-heading">
+                <div><span>Turma</span><h2>${escapeHtml(group.className)}</h2></div>
+                <strong>${group.students.length} ${group.students.length === 1 ? 'aluno' : 'alunos'}</strong>
+              </div>
+              <div class="teacher-student-grid">${group.students.map(renderTeacherStudentCard).join('')}</div>
+            </section>
+          `).join('')}</div>`
+        : '<div class="exam-empty"><div class="empty-icon">◉</div><h3>Nenhum cadastro de aluno</h3><p>Os perfis aparecerão aqui depois que os alunos concluírem o cadastro.</p></div>';
+
+  mainContent.innerHTML = `
+    <section class="exam-page teacher-students-page">
+      <div class="exam-page-heading results-heading">
+        <div><span class="eyebrow">Área do professor</span><h2>Alunos por turma</h2><p>Consulte nome, nickname, e-mail e objetivo informados no perfil global.</p></div>
+        <button class="secondary-btn" onclick="window.refreshTeacherStudents()">Atualizar</button>
+      </div>
+      ${state.teacherStudentsStatus === 'ready' ? `<div class="teacher-student-summary"><span><strong>${studentCount}</strong> ${studentCount === 1 ? 'aluno cadastrado' : 'alunos cadastrados'}</span><span><strong>${groups.length}</strong> ${groups.length === 1 ? 'turma' : 'turmas'}</span></div>` : ''}
+      ${content}
+    </section>
+  `;
+}
+
+async function loadTeacherStudents() {
+  if (!isAdmin()) return;
+  try {
+    const snapshot = await db.collection('users').get();
+    state.teacherStudents = snapshot.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+    state.teacherStudentsStatus = 'ready';
+    state.teacherStudentsMessage = '';
+  } catch (error) {
+    state.teacherStudentsStatus = 'error';
+    state.teacherStudentsMessage = getFriendlyError(error, 'Não foi possível carregar os alunos.');
+  }
+  if (state.currentView === 'teacher-students') renderTeacherStudents();
+}
+
+function renderTeacherResultFilterOptions(options, selectedValue, emptyLabel) {
+  return `<option value="">${escapeHtml(emptyLabel)}</option>${options.map(option => `
+    <option value="${escapeHtml(option.value)}" ${option.value === selectedValue ? 'selected' : ''}>${escapeHtml(option.label)}</option>
+  `).join('')}`;
+}
+
+function renderTeacherResultFilters(filteredCount) {
+  const options = getTeacherResultFilterOptions(state.examResults, state.examResultFilters);
+  const hasActiveFilters = Object.values(state.examResultFilters).some(Boolean);
+  return `
+    <div class="teacher-results-filters">
+      <div class="teacher-results-filter-grid">
+        <label class="exam-field"><span>Turma</span><select onchange="window.updateExamResultFilter('classKey', this.value)">${renderTeacherResultFilterOptions(options.classes, state.examResultFilters.classKey, 'Todas as turmas')}</select></label>
+        <label class="exam-field"><span>Matéria</span><select onchange="window.updateExamResultFilter('subjectKey', this.value)">${renderTeacherResultFilterOptions(options.subjects, state.examResultFilters.subjectKey, 'Todas as matérias')}</select></label>
+        <label class="exam-field"><span>Aluno</span><select onchange="window.updateExamResultFilter('studentKey', this.value)">${renderTeacherResultFilterOptions(options.students, state.examResultFilters.studentKey, 'Todos os alunos')}</select></label>
+        <button type="button" class="secondary-btn clear-result-filters-btn" onclick="window.clearExamResultFilters()" ${hasActiveFilters ? '' : 'disabled'}>Limpar filtros</button>
+      </div>
+      <p class="teacher-results-filter-summary" aria-live="polite">Mostrando <strong>${filteredCount}</strong> de <strong>${state.examResults.length}</strong> resultados.</p>
+    </div>
+  `;
+}
+
 function renderTeacherResultGrade(result) {
   if (result.manualReviewCount > 0) {
     const automatic = result.autoGradedCount > 0
@@ -2486,17 +2615,21 @@ function renderTeacherResults() {
     queueMicrotask(loadTeacherResults);
   }
 
+  const filteredResults = filterTeacherResults(state.examResults, state.examResultFilters);
+  const filters = state.examResultsStatus === 'ready' && state.examResults.length
+    ? renderTeacherResultFilters(filteredResults.length)
+    : '';
   const content = state.examResultsStatus === 'loading'
     ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando resultados...</p></div>'
     : state.examResultsStatus === 'error'
-      ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.examMessage)}</p><button class="next-btn" onclick="window.refreshExamResults()">Tentar novamente</button></div>`
-      : state.examResults.length
+      ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.examResultsMessage)}</p><button class="next-btn" onclick="window.refreshExamResults()">Tentar novamente</button></div>`
+      : filteredResults.length
         ? `
           <div class="results-table-wrap">
             <table class="results-table">
               <thead><tr><th>Aluno</th><th>Prova</th><th>Tempo total</th><th>Nota</th><th>Enviada em</th><th>Ações</th></tr></thead>
               <tbody>
-                ${state.examResults.map(result => `
+                ${filteredResults.map(result => `
                   <tr>
                     <td><strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong><small>${escapeHtml(result.userEmail || '')}</small></td>
                     <td>${escapeHtml(result.examTitle || 'Prova')}<small>${escapeHtml([result.className, result.subjectName].filter(Boolean).join(' · ') || 'Dados acadêmicos não informados')}</small></td>
@@ -2509,15 +2642,18 @@ function renderTeacherResults() {
               </tbody>
             </table>
           </div>`
-        : '<div class="exam-empty"><h3>Nenhuma prova realizada</h3><p>Os resultados aparecerão aqui assim que os alunos enviarem a avaliação.</p></div>';
+        : state.examResults.length
+          ? '<div class="exam-empty filtered-results-empty"><h3>Nenhum resultado encontrado</h3><p>Altere ou limpe os filtros para visualizar outros resultados.</p></div>'
+          : '<div class="exam-empty"><h3>Nenhuma prova realizada</h3><p>Os resultados aparecerão aqui assim que os alunos enviarem a avaliação.</p></div>';
 
   mainContent.innerHTML = `
     <section class="exam-page teacher-results-page">
       <div class="exam-page-heading results-heading">
-        <div><span class="eyebrow">Área do professor</span><h2>Dashboard de Resultados</h2><p>Acompanhe notas e duração das avaliações enviadas.</p></div>
+        <div><span class="eyebrow">Área do professor</span><h2>Dashboard de Resultados</h2><p>Filtre notas e duração por turma, matéria e aluno.</p></div>
         <button class="secondary-btn" onclick="window.refreshExamResults()">Atualizar</button>
       </div>
       ${state.examResultsMessage ? `<div class="exam-alert ${state.examResultsMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.examResultsMessage)}</div>` : ''}
+      ${filters}
       ${content}
     </section>
   `;
@@ -2530,7 +2666,7 @@ async function loadTeacherResults() {
     state.examResultsStatus = 'ready';
   } catch (error) {
     state.examResultsStatus = 'error';
-    state.examMessage = getFriendlyError(error, 'Não foi possível carregar os resultados.');
+    state.examResultsMessage = getFriendlyError(error, 'Não foi possível carregar os resultados.');
   }
   if (state.currentView === 'teacher-results') renderTeacherResults();
 }
@@ -3433,6 +3569,29 @@ window.refreshExamResults = () => {
   state.examResultsMessage = '';
   state.examResultsStatus = 'idle';
   renderTeacherResults();
+};
+
+window.updateExamResultFilter = (field, value) => {
+  if (!['classKey', 'subjectKey', 'studentKey'].includes(field)) return;
+  state.examResultFilters[field] = value;
+  if (field === 'classKey') {
+    state.examResultFilters.subjectKey = '';
+    state.examResultFilters.studentKey = '';
+  } else if (field === 'subjectKey') {
+    state.examResultFilters.studentKey = '';
+  }
+  renderTeacherResults();
+};
+
+window.clearExamResultFilters = () => {
+  state.examResultFilters = { classKey: '', subjectKey: '', studentKey: '' };
+  renderTeacherResults();
+};
+
+window.refreshTeacherStudents = () => {
+  state.teacherStudentsMessage = '';
+  state.teacherStudentsStatus = 'idle';
+  renderTeacherStudents();
 };
 
 window.updateReferenceDraft = (field, value) => {
