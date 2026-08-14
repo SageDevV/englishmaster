@@ -38,10 +38,12 @@ import {
 } from './src/services/examServices.js';
 import {
   DEFAULT_ACADEMIC_CLASSES,
+  getExamSubjectsForClass,
   getProfileClassId,
   getSubjectsForClass,
   mergeAcademicClasses,
   normalizeAcademicKey,
+  resolveExamSubjectSelection,
   validateAcademicEntityName,
   validateAcademicSelection,
   validateStudyReference
@@ -224,6 +226,58 @@ async function createAcademicEntityOnFreeTier(kind, rawName, classId = '') {
   }
   await loadAcademicCatalog();
   return { ok: true, name: entity.name };
+}
+
+async function ensureExamSubjectForClassOnFreeTier(subjectId, classId) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const academicClass = state.academicClasses.find(item => item.id === classId && item.active !== false);
+  if (!academicClass) throw new Error('Selecione uma turma válida para a prova.');
+
+  const subject = state.academicSubjects.find(item => item.id === subjectId
+    && item.active !== false
+    && item.deleted !== true);
+  if (!subject) throw new Error('Selecione uma matéria existente.');
+  if (subject.classId === academicClass.id) return subject.id;
+  if (subject.classId) throw new Error('A matéria selecionada não pertence à turma informada.');
+
+  const linkedSubject = state.academicSubjects.find(item => item.classId === academicClass.id
+    && item.nameKey === subject.nameKey
+    && item.active !== false
+    && item.deleted !== true);
+  if (linkedSubject) return linkedSubject.id;
+
+  const snapshot = await db.collection('academicSubjects').where('nameKey', '==', subject.nameKey).get();
+  const existingDoc = snapshot.docs.find(doc => doc.data().classId === academicClass.id);
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  if (existingDoc) {
+    await existingDoc.ref.update({
+      name: subject.name,
+      classId: academicClass.id,
+      className: academicClass.name,
+      active: true,
+      deleted: false,
+      deletedAt: firebase.firestore.FieldValue.delete(),
+      updatedAt: serverTimestamp
+    });
+    await loadAcademicCatalog();
+    return existingDoc.id;
+  }
+
+  const docRef = await db.collection('academicSubjects').add({
+    name: subject.name,
+    nameKey: subject.nameKey,
+    classId: academicClass.id,
+    className: academicClass.name,
+    active: true,
+    deleted: false,
+    migratedFromSubjectId: subject.id,
+    createdBy: state.user.uid,
+    createdByEmail: state.user.email || '',
+    createdAt: serverTimestamp,
+    updatedAt: serverTimestamp
+  });
+  await loadAcademicCatalog();
+  return docRef.id;
 }
 
 async function archiveAcademicEntityOnFreeTier(kind, id) {
@@ -2243,7 +2297,7 @@ function renderAlternativeBuilder(item, questionIndex, mode) {
 
 function renderTeacherExamCreator() {
   const mainContent = document.getElementById('main-content');
-  const examSubjects = getSubjectsForClass(state.academicSubjects, state.teacherExamClassId);
+  const examSubjects = getExamSubjectsForClass(state.academicSubjects, state.teacherExamClassId);
   const canCreateExam = examSubjects.length > 0;
   mainContent.innerHTML = `
     <section class="exam-page teacher-exam-page">
@@ -2354,7 +2408,7 @@ function renderTeacherExamManager() {
 }
 
 function renderTeacherExamEditor(mainContent) {
-  const editingSubjects = getSubjectsForClass(state.academicSubjects, state.editingExamClassId);
+  const editingSubjects = getExamSubjectsForClass(state.academicSubjects, state.editingExamClassId);
   const canSaveExam = editingSubjects.length > 0;
   mainContent.innerHTML = `
     <section class="exam-page teacher-exam-editor">
@@ -3022,7 +3076,7 @@ window.updateTeacherExamTitle = value => {
 window.updateTeacherExamAudience = (field, value) => {
   if (field === 'classId') {
     state.teacherExamClassId = value;
-    const available = getSubjectsForClass(state.academicSubjects, value);
+    const available = getExamSubjectsForClass(state.academicSubjects, value);
     if (!available.some(subject => subject.id === state.teacherExamSubjectId)) {
       state.teacherExamSubjectId = '';
     }
@@ -3093,10 +3147,15 @@ window.submitExamCreation = async event => {
   submitButton.textContent = 'Criando prova...';
   state.teacherMessage = '';
   try {
+    const subjectId = await ensureExamSubjectForClassOnFreeTier(
+      state.teacherExamSubjectId,
+      state.teacherExamClassId
+    );
+    state.teacherExamSubjectId = subjectId;
     const result = await callExamApi('createExam', {
       title: state.teacherExamTitle,
       classId: state.teacherExamClassId,
-      subjectId: state.teacherExamSubjectId,
+      subjectId,
       questions: state.teacherQuestions
     });
     state.teacherMessage = `Prova criada com sucesso: ${result.questionCount} questão(ões) publicada(s).`;
@@ -3154,7 +3213,12 @@ window.startEditingExam = async examId => {
   state.editingExamId = exam.id;
   state.editingExamTitle = exam.title;
   state.editingExamClassId = exam.classId || 'entra21';
-  state.editingExamSubjectId = exam.subjectId || '';
+  state.editingExamSubjectId = resolveExamSubjectSelection(
+    state.academicSubjects,
+    state.editingExamClassId,
+    exam.subjectId,
+    exam.subjectName
+  );
   state.editingExamQuestions = questions;
   state.teacherExamsStatus = 'ready';
   renderTeacherExamManager();
@@ -3177,7 +3241,7 @@ window.updateEditingExamTitle = value => {
 window.updateEditingExamAudience = (field, value) => {
   if (field === 'classId') {
     state.editingExamClassId = value;
-    const available = getSubjectsForClass(state.academicSubjects, value);
+    const available = getExamSubjectsForClass(state.academicSubjects, value);
     if (!available.some(subject => subject.id === state.editingExamSubjectId)) {
       state.editingExamSubjectId = '';
     }
@@ -3253,11 +3317,16 @@ window.submitExamUpdate = async event => {
   submitButton.textContent = 'Salvando alterações...';
   state.teacherExamsMessage = '';
   try {
+    const subjectId = await ensureExamSubjectForClassOnFreeTier(
+      state.editingExamSubjectId,
+      state.editingExamClassId
+    );
+    state.editingExamSubjectId = subjectId;
     const result = await callExamApi('updateExam', {
       examId: state.editingExamId,
       title: state.editingExamTitle,
       classId: state.editingExamClassId,
-      subjectId: state.editingExamSubjectId,
+      subjectId,
       questions: state.editingExamQuestions
     });
     state.editingExamId = null;

@@ -2,10 +2,12 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   DEFAULT_ACADEMIC_CLASSES,
+  getExamSubjectsForClass,
   getProfileClassId,
   getSubjectsForClass,
   mergeAcademicClasses,
   normalizeAcademicKey,
+  resolveExamSubjectSelection,
   validateAcademicEntityName,
   validateAcademicSelection,
   validateStudyReference
@@ -58,6 +60,44 @@ describe('academic model', () => {
     assert.throws(
       () => validateAcademicSelection({ classId: 'missing', subjectId: 'subject-1' }, DEFAULT_ACADEMIC_CLASSES, subjects),
       /turma válida/
+    );
+  });
+
+  it('provides existing subjects for new and previously registered exams', () => {
+    const availableSubjects = [
+      ...subjects,
+      { id: 'legacy-subject', name: 'Lógica de Programação', active: true },
+      { id: 'other-class', name: 'Banco de Dados', classId: 'jovemprogramador', active: true }
+    ];
+
+    assert.deepEqual(
+      getExamSubjectsForClass(availableSubjects, 'entra21').map(item => item.id),
+      ['subject-1', 'legacy-subject']
+    );
+    assert.equal(
+      resolveExamSubjectSelection(availableSubjects, 'entra21', 'legacy-subject', 'Lógica de Programação'),
+      'legacy-subject'
+    );
+
+    const linkedCopy = {
+      id: 'linked-copy',
+      name: 'Lógica de Programação',
+      nameKey: 'logica de programacao',
+      classId: 'entra21',
+      active: true
+    };
+    assert.deepEqual(
+      getExamSubjectsForClass([...availableSubjects, linkedCopy], 'entra21').map(item => item.id),
+      ['subject-1', 'linked-copy']
+    );
+    assert.equal(
+      resolveExamSubjectSelection(
+        [...availableSubjects, linkedCopy],
+        'entra21',
+        'legacy-subject',
+        'Lógica de Programação'
+      ),
+      'linked-copy'
     );
   });
 

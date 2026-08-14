@@ -54,6 +54,40 @@ export function getSubjectsForClass(subjects = [], classId = '') {
     && subject.active !== false);
 }
 
+export function getExamSubjectsForClass(subjects = [], classId = '') {
+  const targetClassId = String(classId || '');
+  const subjectsByName = new Map();
+  subjects
+    .filter(subject => subject
+      && subject.deleted !== true
+      && subject.active !== false
+      && (subject.classId === targetClassId || !subject.classId))
+    .forEach(subject => {
+      const nameKey = subject.nameKey || normalizeAcademicKey(subject.name);
+      const current = subjectsByName.get(nameKey);
+      if (!current || (current.classId !== targetClassId && subject.classId === targetClassId)) {
+        subjectsByName.set(nameKey, subject);
+      }
+    });
+  return [...subjectsByName.values()]
+    .sort((a, b) => String(a.name || '').localeCompare(String(b.name || ''), 'pt-BR'));
+}
+
+export function resolveExamSubjectSelection(
+  subjects = [],
+  classId = '',
+  subjectId = '',
+  subjectName = ''
+) {
+  const options = getExamSubjectsForClass(subjects, classId);
+  const directMatch = options.find(subject => subject.id === String(subjectId || ''));
+  if (directMatch) return directMatch.id;
+
+  const sourceSubject = subjects.find(subject => subject.id === String(subjectId || ''));
+  const selectedNameKey = normalizeAcademicKey(subjectName || sourceSubject?.name);
+  return options.find(subject => (subject.nameKey || normalizeAcademicKey(subject.name)) === selectedNameKey)?.id || '';
+}
+
 export function validateAcademicSelection(data = {}, classes = [], subjects = []) {
   const academicClass = findActive(classes, data.classId, 'uma turma válida');
   const subject = findActive(subjects, data.subjectId, 'uma matéria válida');
