@@ -1135,14 +1135,6 @@ function renderHubHome() {
   state.currentView = 'hub';
   const mainContent = document.getElementById('main-content');
   const modules = [
-    {
-      view: 'english-master',
-      icon: '🌐',
-      kicker: 'Submódulo de aprendizagem',
-      title: 'English Master',
-      description: 'Trilhas, quizzes, ranking e desafios para praticar inglês.',
-      featured: true
-    },
     ...(isAdmin() ? [
       {
         view: 'teacher-create',
