@@ -1,6 +1,12 @@
 export const EXAM_QUESTION_TYPES = Object.freeze({
   MULTIPLE_CHOICE: 'multiple_choice',
-  ZIP_ATTACHMENT: 'zip_attachment'
+  ZIP_ATTACHMENT: 'zip_attachment',
+  ESSAY: 'essay'
+});
+
+export const ESSAY_REVIEW_DECISIONS = Object.freeze({
+  APPROVED: 'approved',
+  REJECTED: 'rejected'
 });
 
 export const MAX_ZIP_FILE_SIZE_BYTES = 5 * 1024 * 1024;
@@ -69,9 +75,9 @@ export function validateStudentName(value, label) {
 }
 
 export function getExamQuestionType(question = {}) {
-  return question.type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
-    ? EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
-    : EXAM_QUESTION_TYPES.MULTIPLE_CHOICE;
+  if (question.type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT) return EXAM_QUESTION_TYPES.ZIP_ATTACHMENT;
+  if (question.type === EXAM_QUESTION_TYPES.ESSAY) return EXAM_QUESTION_TYPES.ESSAY;
+  return EXAM_QUESTION_TYPES.MULTIPLE_CHOICE;
 }
 
 function validateQuestionPrompt(item, index) {
@@ -89,8 +95,12 @@ export function sanitizeExamAnswers(rawAnswers, questions) {
   }));
 }
 
-export async function gradeExamAnswers(exam, answers) {
+export async function gradeExamAnswers(exam, answers, essayReview = null) {
   const answersById = new Map((answers || []).map(item => [item.questionId, item.value || '']));
+  const allowedDecisions = new Set(Object.values(ESSAY_REVIEW_DECISIONS));
+  const decisionsById = new Map((essayReview?.items || [])
+    .filter(item => allowedDecisions.has(item?.decision))
+    .map(item => [item.questionId, item.decision]));
   const feedback = await Promise.all((exam.questions || []).map(async question => {
     const studentAnswer = answersById.get(question.id) || '';
     const type = getExamQuestionType(question);
@@ -103,7 +113,24 @@ export async function gradeExamAnswers(exam, answers) {
         studentAnswer,
         attachmentId: studentAnswer,
         isCorrect: null,
-        requiresManualReview: true
+        requiresManualReview: true,
+        requiresEssayReview: false
+      };
+    }
+
+    if (type === EXAM_QUESTION_TYPES.ESSAY) {
+      const decision = decisionsById.get(question.id) || null;
+      const finalized = essayReview?.status === 'finalized';
+      return {
+        questionId: question.id,
+        prompt: question.prompt,
+        type,
+        studentAnswer,
+        essayDecision: decision,
+        reviewStatus: finalized && decision ? decision : 'pending',
+        isCorrect: finalized && decision ? decision === ESSAY_REVIEW_DECISIONS.APPROVED : null,
+        requiresManualReview: false,
+        requiresEssayReview: true
       };
     }
 
@@ -114,18 +141,40 @@ export async function gradeExamAnswers(exam, answers) {
       type,
       studentAnswer,
       isCorrect: answerHash === question.answerHash,
-      requiresManualReview: false
+      requiresManualReview: false,
+      requiresEssayReview: false
     };
   }));
 
-  const objectiveFeedback = feedback.filter(item => !item.requiresManualReview);
+  const objectiveFeedback = feedback.filter(item => item.type === EXAM_QUESTION_TYPES.MULTIPLE_CHOICE);
+  const essayFeedback = feedback.filter(item => item.requiresEssayReview);
+  const reviewedEssayFeedback = essayFeedback.filter(item => item.essayDecision);
+  const approvedEssayCount = reviewedEssayFeedback
+    .filter(item => item.essayDecision === ESSAY_REVIEW_DECISIONS.APPROVED).length;
   const correctCount = objectiveFeedback.filter(item => item.isCorrect).length;
   const autoGradedCount = objectiveFeedback.length;
-  const manualReviewCount = feedback.length - autoGradedCount;
+  const manualReviewCount = feedback.filter(item => item.requiresManualReview).length;
+  const essayQuestionCount = essayFeedback.length;
+  const reviewedEssayCount = reviewedEssayFeedback.length;
+  const pendingEssayReviewCount = essayQuestionCount - reviewedEssayCount;
+  const finalGradeReady = essayQuestionCount === 0
+    || (essayReview?.status === 'finalized' && pendingEssayReviewCount === 0);
+  const finalCorrectCount = correctCount + approvedEssayCount;
+  const finalGradedQuestionCount = autoGradedCount + essayQuestionCount;
   return {
     correctCount,
     autoGradedCount,
     manualReviewCount,
+    essayQuestionCount,
+    reviewedEssayCount,
+    pendingEssayReviewCount,
+    approvedEssayCount,
+    finalGradeReady,
+    finalCorrectCount,
+    finalGradedQuestionCount,
+    finalPercentage: finalGradeReady && finalGradedQuestionCount
+      ? Math.round((finalCorrectCount / finalGradedQuestionCount) * 100)
+      : null,
     totalQuestions: feedback.length,
     percentage: autoGradedCount ? Math.round((correctCount / autoGradedCount) * 100) : null,
     feedback
@@ -157,6 +206,13 @@ export function validateMultipleChoiceQuestion(item, index = 0) {
     throw new Error(`Selecione a resposta correta da questão ${index + 1}.`);
   }
   return { type: EXAM_QUESTION_TYPES.MULTIPLE_CHOICE, prompt, options, correctOptionIndex };
+}
+
+export function validateEssayQuestion(item, index = 0) {
+  return {
+    type: EXAM_QUESTION_TYPES.ESSAY,
+    prompt: validateQuestionPrompt(item, index)
+  };
 }
 
 export function validateZipAttachmentQuestion(item, index = 0) {

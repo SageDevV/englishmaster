@@ -4,6 +4,7 @@ import {
   calculateExamElapsedSeconds,
   DEFAULT_EXAM_DURATION_MINUTES,
   DEFAULT_EXAM_DURATION_SECONDS,
+  ESSAY_REVIEW_DECISIONS,
   EXAM_QUESTION_TYPES,
   formatExamDurationLabel,
   getExamDurationSeconds,
@@ -17,6 +18,7 @@ import {
   sanitizeExamAnswers,
   splitAttachmentBytes,
   validateExamDurationMinutes,
+  validateEssayQuestion,
   validateMultipleChoiceQuestion,
   validateStudentName,
   validateZipAttachmentQuestion,
@@ -40,6 +42,12 @@ assert.equal(formatExamDurationLabel(5_400), '1 hora e 30 minutos');
 assert.equal(formatExamDurationLabel(undefined), '2 horas');
 assert.equal(getExamQuestionType({}), EXAM_QUESTION_TYPES.MULTIPLE_CHOICE);
 assert.equal(getExamQuestionType({ type: 'zip_attachment' }), EXAM_QUESTION_TYPES.ZIP_ATTACHMENT);
+assert.equal(getExamQuestionType({ type: 'essay' }), EXAM_QUESTION_TYPES.ESSAY);
+assert.deepEqual(validateEssayQuestion({ prompt: 'Explique HTTP.' }), {
+  type: EXAM_QUESTION_TYPES.ESSAY,
+  prompt: 'Explique HTTP.'
+});
+assert.throws(() => validateEssayQuestion({ prompt: '' }), /Preencha a pergunta/);
 
 const salt = 'fixed-test-salt';
 const questions = [
@@ -132,5 +140,83 @@ const manualOnlyResult = await gradeExamAnswers(
 );
 assert.equal(manualOnlyResult.percentage, null);
 assert.equal(manualOnlyResult.manualReviewCount, 1);
+
+const essayQuestions = [
+  questions[0],
+  { id: 'essay1', prompt: 'Explique HTTP.', type: EXAM_QUESTION_TYPES.ESSAY }
+];
+const essayAnswers = sanitizeExamAnswers([
+  { value: 'I am fine' },
+  { value: 'HTTP é um protocolo de aplicação.' }
+], essayQuestions);
+const pendingEssayResult = await gradeExamAnswers(
+  { gradingSalt: salt, questions: essayQuestions },
+  essayAnswers
+);
+assert.equal(pendingEssayResult.correctCount, 1);
+assert.equal(pendingEssayResult.essayQuestionCount, 1);
+assert.equal(pendingEssayResult.pendingEssayReviewCount, 1);
+assert.equal(pendingEssayResult.finalGradeReady, false);
+assert.equal(pendingEssayResult.finalPercentage, null);
+assert.equal(pendingEssayResult.feedback[1].requiresEssayReview, true);
+
+const reviewedEssayResult = await gradeExamAnswers(
+  { gradingSalt: salt, questions: essayQuestions },
+  essayAnswers,
+  {
+    status: 'in_review',
+    items: [{ questionId: 'essay1', decision: ESSAY_REVIEW_DECISIONS.APPROVED }]
+  }
+);
+assert.equal(reviewedEssayResult.reviewedEssayCount, 1);
+assert.equal(reviewedEssayResult.pendingEssayReviewCount, 0);
+assert.equal(reviewedEssayResult.finalGradeReady, false);
+assert.equal(reviewedEssayResult.feedback[1].isCorrect, null);
+
+const finalizedEssayResult = await gradeExamAnswers(
+  { gradingSalt: salt, questions: essayQuestions },
+  essayAnswers,
+  {
+    status: 'finalized',
+    items: [{ questionId: 'essay1', decision: ESSAY_REVIEW_DECISIONS.APPROVED }]
+  }
+);
+assert.equal(finalizedEssayResult.finalGradeReady, true);
+assert.equal(finalizedEssayResult.finalCorrectCount, 2);
+assert.equal(finalizedEssayResult.finalGradedQuestionCount, 2);
+assert.equal(finalizedEssayResult.finalPercentage, 100);
+assert.equal(finalizedEssayResult.feedback[1].isCorrect, true);
+
+const rejectedEssayResult = await gradeExamAnswers(
+  { gradingSalt: salt, questions: essayQuestions },
+  essayAnswers,
+  {
+    status: 'finalized',
+    items: [{ questionId: 'essay1', decision: ESSAY_REVIEW_DECISIONS.REJECTED }]
+  }
+);
+assert.equal(rejectedEssayResult.finalCorrectCount, 1);
+assert.equal(rejectedEssayResult.finalPercentage, 50);
+assert.equal(rejectedEssayResult.feedback[1].isCorrect, false);
+
+const essayWithZipResult = await gradeExamAnswers(
+  {
+    gradingSalt: salt,
+    questions: [questions[0], essayQuestions[1], mixedQuestions[1]]
+  },
+  [
+    { questionId: 'q1', value: 'I am fine' },
+    { questionId: 'essay1', value: 'HTTP é um protocolo de aplicação.' },
+    { questionId: 'zip1', value: 'attachment' }
+  ],
+  {
+    status: 'finalized',
+    items: [{ questionId: 'essay1', decision: ESSAY_REVIEW_DECISIONS.APPROVED }]
+  }
+);
+assert.equal(essayWithZipResult.finalPercentage, 100);
+assert.equal(essayWithZipResult.finalGradedQuestionCount, 2);
+assert.equal(essayWithZipResult.manualReviewCount, 1);
+assert.equal(essayWithZipResult.totalQuestions, 3);
 
 console.log('examServices tests passed');

@@ -15,11 +15,17 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == userId;
     }
 
+    function attemptDuration(data) {
+      return data.keys().hasAny(['durationSeconds'])
+        ? duration.value(data.durationSeconds, 's')
+        : duration.value(2, 'h');
+    }
+
     function validAttemptCreate(attemptId) {
       let exam = get(/databases/$(database)/documents/exams/$(request.resource.data.examId));
       return request.resource.data.keys().hasOnly([
           'examId', 'examTitle', 'userId', 'userEmail', 'firstName', 'lastName',
-          'status', 'startedAt', 'examSnapshot', 'answers', 'updatedAt'
+          'status', 'startedAt', 'durationSeconds', 'examSnapshot', 'answers', 'updatedAt'
         ])
         && request.resource.data.userId == request.auth.uid
         && request.resource.data.userEmail == request.auth.token.email
@@ -32,12 +38,18 @@ service cloud.firestore {
         && request.resource.data.lastName is string
         && request.resource.data.lastName.size() >= 2
         && request.resource.data.lastName.size() <= 80
+        && request.resource.data.durationSeconds is int
+        && request.resource.data.durationSeconds >= 60
+        && request.resource.data.durationSeconds <= 43200
+        && ((!exam.data.keys().hasAny(['durationSeconds']) && request.resource.data.durationSeconds == 7200)
+          || request.resource.data.durationSeconds == exam.data.durationSeconds)
         && request.resource.data.startedAt is timestamp
         && request.resource.data.startedAt == request.time
         && request.resource.data.updatedAt == request.time
         && request.resource.data.examSnapshot is map
-        && request.resource.data.examSnapshot.keys().hasOnly(['title', 'questions', 'gradingSalt'])
+        && request.resource.data.examSnapshot.keys().hasOnly(['title', 'durationSeconds', 'questions', 'gradingSalt'])
         && request.resource.data.examSnapshot.title == exam.data.title
+        && request.resource.data.examSnapshot.durationSeconds == request.resource.data.durationSeconds
         && request.resource.data.examSnapshot.questions == exam.data.questions
         && request.resource.data.examSnapshot.gradingSalt == exam.data.gradingSalt
         && request.resource.data.answers is list
@@ -67,7 +79,7 @@ service cloud.firestore {
           || (!(resource.data.examSnapshot is map)
             && request.resource.data.answers.size() == exam.data.questionCount));
       let validSave = request.resource.data.status == 'in_progress'
-        && request.time < resource.data.startedAt + duration.value(2, 'h')
+        && request.time < resource.data.startedAt + attemptDuration(resource.data)
         && request.resource.data.updatedAt == request.time
         && changed.hasOnly(['answers', 'updatedAt']);
       let validSubmission = request.resource.data.status == 'submitted'
@@ -75,7 +87,7 @@ service cloud.firestore {
         && request.resource.data.submittedAt == request.time
         && request.resource.data.updatedAt == request.time
         && changed.hasOnly(['answers', 'status', 'submittedAt', 'updatedAt'])
-        && (request.time < resource.data.startedAt + duration.value(2, 'h')
+        && (request.time < resource.data.startedAt + attemptDuration(resource.data)
           || request.resource.data.answers == resource.data.answers);
       return resource.data.status == 'in_progress'
         && immutableFieldsMatch
@@ -91,6 +103,37 @@ service cloud.firestore {
         && request.resource.data.logDeletedAt is timestamp
         && request.resource.data.logDeletedAt == request.time
         && changed.hasOnly(['logDeleted', 'logDeletedAt']);
+    }
+
+    function validAdminEssayReview() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      let review = request.resource.data.essayReview;
+      let validInProgressReview = review.status == 'in_review'
+        && changed.hasOnly(['essayReview', 'essayReviewUpdatedAt']);
+      let validFinalReview = review.status == 'finalized'
+        && request.resource.data.finalScore is map
+        && request.resource.data.finalScore.keys().hasOnly(['correctCount', 'totalQuestions', 'percentage'])
+        && request.resource.data.finalScore.correctCount is int
+        && request.resource.data.finalScore.totalQuestions is int
+        && request.resource.data.finalScore.percentage is int
+        && request.resource.data.finalScore.correctCount >= 0
+        && request.resource.data.finalScore.correctCount <= request.resource.data.finalScore.totalQuestions
+        && request.resource.data.finalScore.totalQuestions > 0
+        && request.resource.data.finalScore.percentage >= 0
+        && request.resource.data.finalScore.percentage <= 100
+        && request.resource.data.finalGradeAt is timestamp
+        && request.resource.data.finalGradeAt == request.time
+        && changed.hasOnly(['essayReview', 'essayReviewUpdatedAt', 'finalScore', 'finalGradeAt']);
+      return isAdmin()
+        && resource.data.status == 'submitted'
+        && (!resource.data.keys().hasAny(['essayReview']) || resource.data.essayReview.status != 'finalized')
+        && review is map
+        && review.items is list
+        && review.reviewedBy == request.auth.uid
+        && review.reviewedByEmail == request.auth.token.email
+        && request.resource.data.essayReviewUpdatedAt is timestamp
+        && request.resource.data.essayReviewUpdatedAt == request.time
+        && (validInProgressReview || validFinalReview);
     }
 
     function validAttachmentMetadata(attachmentId) {
@@ -113,7 +156,7 @@ service cloud.firestore {
         && attempt.data.userId == request.auth.uid
         && attempt.data.examId == data.examId
         && attempt.data.status == 'in_progress'
-        && request.time < attempt.data.startedAt + duration.value(2, 'h')
+        && request.time < attempt.data.startedAt + attemptDuration(attempt.data)
         && data.fileName is string
         && data.fileName.size() >= 5
         && data.fileName.size() <= 255
@@ -149,7 +192,7 @@ service cloud.firestore {
         && attachment.data.status == 'uploading'
         && attempt.data.userId == request.auth.uid
         && attempt.data.status == 'in_progress'
-        && request.time < attempt.data.startedAt + duration.value(2, 'h')
+        && request.time < attempt.data.startedAt + attemptDuration(attempt.data)
         && request.resource.data.keys().hasOnly(['index', 'size', 'data', 'updatedAt'])
         && request.resource.data.index is int
         && request.resource.data.index >= 0
@@ -169,7 +212,7 @@ service cloud.firestore {
       return data.userId == request.auth.uid
         && attempt.data.userId == request.auth.uid
         && attempt.data.status == 'in_progress'
-        && request.time < attempt.data.startedAt + duration.value(2, 'h');
+        && request.time < attempt.data.startedAt + attemptDuration(attempt.data);
     }
 
     match /users/{userId} {
@@ -256,7 +299,8 @@ service cloud.firestore {
       allow create: if signedIn() && validAttemptCreate(attemptId);
       allow update: if signedIn()
         && ((resource.data.userId == request.auth.uid && validAttemptUpdate())
-          || validAdminLogDeletion());
+          || validAdminLogDeletion()
+          || validAdminEssayReview());
       allow delete: if false;
     }
   }

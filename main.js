@@ -37,6 +37,7 @@ import {
   sanitizeExamAnswers,
   splitAttachmentBytes,
   validateExamDurationMinutes,
+  validateEssayQuestion,
   validateMultipleChoiceQuestion,
   validateStudentName,
   validateZipAttachmentQuestion,
@@ -113,6 +114,13 @@ function createZipAttachmentDraft() {
     type: EXAM_QUESTION_TYPES.ZIP_ATTACHMENT,
     prompt: '',
     maxFileSizeBytes: MAX_ZIP_FILE_SIZE_BYTES
+  };
+}
+
+function createEssayDraft() {
+  return {
+    type: EXAM_QUESTION_TYPES.ESSAY,
+    prompt: ''
   };
 }
 
@@ -415,6 +423,9 @@ async function serializeAttemptData(data, fallbackExam) {
     startedAtMillis,
     endsAtMillis: startedAtMillis + durationSeconds * 1000,
     submittedAtMillis: timestampToMillis(data.submittedAt),
+    essayReview: data.essayReview || null,
+    finalScore: data.finalScore || null,
+    finalGradeAtMillis: timestampToMillis(data.finalGradeAt),
     elapsedSeconds: data.submittedAt
       ? calculateExamElapsedSeconds(
           timestampToMillis(data.startedAt),
@@ -423,7 +434,7 @@ async function serializeAttemptData(data, fallbackExam) {
         )
       : null
   };
-  if (data.status === 'submitted') Object.assign(result, await gradeExamAnswers(exam, data.answers));
+  if (data.status === 'submitted') Object.assign(result, await gradeExamAnswers(exam, data.answers, data.essayReview));
   return result;
 }
 
@@ -528,13 +539,22 @@ async function getExamsWithRunningAttempts() {
 }
 
 async function buildStoredExamQuestion(item, index, gradingSalt, questionId) {
-  if (getExamQuestionType(item) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT) {
+  const type = getExamQuestionType(item);
+  if (type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT) {
     const zipQuestion = validateZipAttachmentQuestion(item, index);
     return {
       id: questionId,
       type: zipQuestion.type,
       prompt: zipQuestion.prompt,
       maxFileSizeBytes: zipQuestion.maxFileSizeBytes
+    };
+  }
+  if (type === EXAM_QUESTION_TYPES.ESSAY) {
+    const essayQuestion = validateEssayQuestion(item, index);
+    return {
+      id: questionId,
+      type: essayQuestion.type,
+      prompt: essayQuestion.prompt
     };
   }
 
@@ -918,6 +938,16 @@ async function listExamResultsOnFreeTier() {
       correctCount: computed.correctCount,
       autoGradedCount: computed.autoGradedCount,
       manualReviewCount: computed.manualReviewCount,
+      essayQuestionCount: computed.essayQuestionCount,
+      reviewedEssayCount: computed.reviewedEssayCount,
+      pendingEssayReviewCount: computed.pendingEssayReviewCount,
+      approvedEssayCount: computed.approvedEssayCount,
+      finalGradeReady: computed.finalGradeReady,
+      finalCorrectCount: computed.finalCorrectCount,
+      finalGradedQuestionCount: computed.finalGradedQuestionCount,
+      finalPercentage: computed.finalPercentage,
+      essayReview: computed.essayReview,
+      feedback: computed.feedback,
       totalQuestions: computed.totalQuestions,
       percentage: computed.percentage,
       attachments,
@@ -969,6 +999,96 @@ async function downloadExamAttachmentOnFreeTier(attachmentId) {
   return { ok: true, fileName: metadata.fileName };
 }
 
+async function getEssayReviewContext(resultId) {
+  const attemptRef = db.collection('examAttempts').doc(String(resultId || ''));
+  const attemptDoc = await attemptRef.get();
+  if (!attemptDoc.exists || attemptDoc.data().status !== 'submitted') {
+    throw new Error('Resultado enviado não encontrado.');
+  }
+  const attempt = attemptDoc.data();
+  const examDoc = await db.collection('exams').doc(attempt.examId).get();
+  const fallbackExam = examDoc.exists
+    ? serializeExamDocument(examDoc)
+    : {
+        id: attempt.examId,
+        title: attempt.examTitle,
+        durationSeconds: getAttemptDurationSeconds(attempt),
+        questions: attempt.examSnapshot?.questions || [],
+        gradingSalt: attempt.examSnapshot?.gradingSalt || ''
+      };
+  return { attemptRef, attempt, exam: getAttemptExam(attempt, fallbackExam) };
+}
+
+async function reviewEssayAnswerOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const decision = String(data.decision || '');
+  if (!['approved', 'rejected'].includes(decision)) throw new Error('Decisão de correção inválida.');
+  const { attemptRef, attempt, exam } = await getEssayReviewContext(data.resultId);
+  if (attempt.essayReview?.status === 'finalized') {
+    throw new Error('A nota final desta tentativa já foi contabilizada.');
+  }
+  const questionId = String(data.questionId || '');
+  const essayQuestions = (exam.questions || [])
+    .filter(question => getExamQuestionType(question) === EXAM_QUESTION_TYPES.ESSAY);
+  if (!essayQuestions.some(question => question.id === questionId)) {
+    throw new Error('Questão dissertativa não encontrada nesta tentativa.');
+  }
+  const currentItems = Array.isArray(attempt.essayReview?.items) ? attempt.essayReview.items : [];
+  const decisions = new Map(currentItems.map(item => [item.questionId, item.decision]));
+  decisions.set(questionId, decision);
+  const validQuestionIds = new Set(essayQuestions.map(question => question.id));
+  const items = [...decisions]
+    .filter(([id, value]) => validQuestionIds.has(id) && ['approved', 'rejected'].includes(value))
+    .map(([id, value]) => ({ questionId: id, decision: value }));
+  await attemptRef.update({
+    essayReview: {
+      status: 'in_review',
+      items,
+      reviewedBy: state.user.uid,
+      reviewedByEmail: state.user.email || ''
+    },
+    essayReviewUpdatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true };
+}
+
+async function finalizeEssayReviewOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const { attemptRef, attempt, exam } = await getEssayReviewContext(data.resultId);
+  if (attempt.essayReview?.status === 'finalized') {
+    return { ok: true, finalScore: attempt.finalScore?.percentage ?? null };
+  }
+  const essayQuestions = (exam.questions || [])
+    .filter(question => getExamQuestionType(question) === EXAM_QUESTION_TYPES.ESSAY);
+  if (!essayQuestions.length) throw new Error('Esta prova não possui questões dissertativas.');
+  const decisions = new Map((attempt.essayReview?.items || []).map(item => [item.questionId, item.decision]));
+  if (essayQuestions.some(question => !['approved', 'rejected'].includes(decisions.get(question.id)))) {
+    throw new Error('Corrija todas as questões dissertativas antes de contabilizar a nota final.');
+  }
+  const essayReview = {
+    status: 'finalized',
+    items: essayQuestions.map(question => ({
+      questionId: question.id,
+      decision: decisions.get(question.id)
+    })),
+    reviewedBy: state.user.uid,
+    reviewedByEmail: state.user.email || ''
+  };
+  const computed = await gradeExamAnswers(exam, attempt.answers, essayReview);
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  await attemptRef.update({
+    essayReview,
+    essayReviewUpdatedAt: serverTimestamp,
+    finalGradeAt: serverTimestamp,
+    finalScore: {
+      correctCount: computed.finalCorrectCount,
+      totalQuestions: computed.finalGradedQuestionCount,
+      percentage: computed.finalPercentage
+    }
+  });
+  return { ok: true, finalScore: computed.finalPercentage };
+}
+
 async function deleteExamResultLogOnFreeTier(data) {
   if (!isAdmin()) throw new Error('Área exclusiva do professor.');
   const resultId = String(data.resultId || '');
@@ -998,6 +1118,8 @@ const freeTierApi = {
   submitExam: submitExamOnFreeTier,
   listExamResults: listExamResultsOnFreeTier,
   downloadExamAttachment: ({ attachmentId }) => downloadExamAttachmentOnFreeTier(attachmentId),
+  reviewEssayAnswer: reviewEssayAnswerOnFreeTier,
+  finalizeEssayReview: finalizeEssayReviewOnFreeTier,
   deleteExamResultLog: deleteExamResultLogOnFreeTier
 };
 
@@ -1125,6 +1247,8 @@ const state = {
   examResults: [],
   examResultsStatus: 'idle',
   examResultsMessage: '',
+  reviewingExamResultId: null,
+  examReviewSaving: false,
   examResultFilters: {
     classKey: '',
     subjectKey: '',
@@ -2301,6 +2425,7 @@ function renderQuestionTypeSelector(item, questionIndex, mode) {
       <select onchange="window.${handler}(${questionIndex}, this.value)">
         <option value="${EXAM_QUESTION_TYPES.MULTIPLE_CHOICE}" ${type === EXAM_QUESTION_TYPES.MULTIPLE_CHOICE ? 'selected' : ''}>Múltipla escolha</option>
         <option value="${EXAM_QUESTION_TYPES.ZIP_ATTACHMENT}" ${type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT ? 'selected' : ''}>Resposta com anexo ZIP</option>
+        <option value="${EXAM_QUESTION_TYPES.ESSAY}" ${type === EXAM_QUESTION_TYPES.ESSAY ? 'selected' : ''}>Dissertativa</option>
       </select>
     </label>
   `;
@@ -2316,6 +2441,25 @@ function renderZipAttachmentBuilder() {
       </div>
     </div>
   `;
+}
+
+function renderEssayBuilder() {
+  return `
+    <div class="essay-question-config">
+      <span class="essay-question-icon" aria-hidden="true">TXT</span>
+      <div>
+        <strong>Resposta dissertativa</strong>
+        <p>O aluno responderá em texto. A nota definitiva ficará pendente até o professor aprovar ou reprovar esta resposta.</p>
+      </div>
+    </div>
+  `;
+}
+
+function renderQuestionBuilderByType(item, questionIndex, mode) {
+  const type = getExamQuestionType(item);
+  if (type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT) return renderZipAttachmentBuilder();
+  if (type === EXAM_QUESTION_TYPES.ESSAY) return renderEssayBuilder();
+  return renderAlternativeBuilder(item, questionIndex, mode);
 }
 
 function renderAlternativeBuilder(item, questionIndex, mode) {
@@ -2359,7 +2503,7 @@ function renderTeacherExamCreator() {
         <div>
           <span class="eyebrow">Área do professor</span>
           <h2>Criação de Prova</h2>
-          <p>Escolha entre perguntas de múltipla escolha ou entregas de projetos em arquivo ZIP para revisão manual.</p>
+          <p>Crie questões de múltipla escolha, dissertativas ou entregas em arquivo ZIP.</p>
         </div>
       </div>
 
@@ -2398,9 +2542,7 @@ function renderTeacherExamCreator() {
                 <textarea required maxlength="5000" rows="3" placeholder="Digite a pergunta"
                   oninput="window.updateTeacherQuestion(${index}, 'prompt', this.value)">${escapeHtml(item.prompt)}</textarea>
               </label>
-              ${getExamQuestionType(item) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
-                ? renderZipAttachmentBuilder()
-                : renderAlternativeBuilder(item, index, 'create')}
+              ${renderQuestionBuilderByType(item, index, 'create')}
               <button type="button" class="remove-question-btn" onclick="window.removeTeacherQuestion(${index})"
                 ${state.teacherQuestions.length === 1 ? 'disabled' : ''} aria-label="Remover questão ${index + 1}">Remover</button>
             </article>
@@ -2475,7 +2617,7 @@ function renderTeacherExamEditor(mainContent) {
   mainContent.innerHTML = `
     <section class="exam-page teacher-exam-editor">
       <div class="exam-page-heading">
-        <div><span class="eyebrow">Editar prova</span><h2>${escapeHtml(state.editingExamTitle)}</h2><p>Edite o enunciado e escolha entre múltipla escolha ou entrega de arquivo ZIP.</p></div>
+        <div><span class="eyebrow">Editar prova</span><h2>${escapeHtml(state.editingExamTitle)}</h2><p>Edite questões objetivas, dissertativas ou entregas em ZIP.</p></div>
         <button class="secondary-btn" onclick="window.cancelExamEditing()">Cancelar edição</button>
       </div>
       <form class="exam-builder" onsubmit="window.submitExamUpdate(event)">
@@ -2500,9 +2642,7 @@ function renderTeacherExamEditor(mainContent) {
               <div class="question-builder-number">${index + 1}</div>
               ${renderQuestionTypeSelector(item, index, 'edit')}
               <label class="exam-field"><span>Pergunta</span><textarea required maxlength="5000" rows="3" oninput="window.updateEditingExamQuestion(${index}, 'prompt', this.value)">${escapeHtml(item.prompt)}</textarea></label>
-              ${getExamQuestionType(item) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
-                ? renderZipAttachmentBuilder()
-                : renderAlternativeBuilder(item, index, 'edit')}
+              ${renderQuestionBuilderByType(item, index, 'edit')}
               <button type="button" class="remove-question-btn" onclick="window.removeEditingExamQuestion(${index})" ${state.editingExamQuestions.length === 1 ? 'disabled' : ''}>Remover</button>
             </article>
           `).join('')}
@@ -2624,29 +2764,108 @@ function renderTeacherResultFilters(filteredCount) {
 }
 
 function renderTeacherResultGrade(result) {
-  if (result.manualReviewCount > 0) {
+  if (result.essayQuestionCount > 0 && !result.finalGradeReady) {
+    const progress = `${result.reviewedEssayCount}/${result.essayQuestionCount} dissertativas corrigidas`;
+    const status = result.pendingEssayReviewCount === 0 ? 'Pronta para contabilizar' : 'Correção pendente';
     const automatic = result.autoGradedCount > 0
       ? `<small>Objetivas: ${result.correctCount}/${result.autoGradedCount} · ${result.percentage}%</small>`
       : '<small>Sem questões objetivas</small>';
-    return `<span class="grade-pill manual-review">Revisão manual</span>${automatic}`;
+    const zip = result.manualReviewCount > 0 ? '<small>ZIP em revisão separada</small>' : '';
+    return `<span class="grade-pill manual-review">${status}</span><small>${progress}</small>${automatic}${zip}`;
   }
-  return `<span class="grade-pill">${result.correctCount}/${result.totalQuestions} · ${result.percentage}%</span>`;
+  if (result.manualReviewCount > 0) {
+    const scored = result.finalPercentage !== null
+      ? `<small>Nota contabilizada: ${result.finalPercentage}%</small>`
+      : result.autoGradedCount > 0
+        ? `<small>Objetivas: ${result.correctCount}/${result.autoGradedCount} · ${result.percentage}%</small>`
+        : '<small>Sem nota calculável</small>';
+    return `<span class="grade-pill manual-review">ZIP em revisão</span>${scored}`;
+  }
+  if (result.finalGradeReady && result.finalPercentage !== null) {
+    return `<span class="grade-pill">${result.finalCorrectCount}/${result.finalGradedQuestionCount} · ${result.finalPercentage}%</span>`;
+  }
+  return '<span class="grade-pill manual-review">Sem nota calculável</span>';
 }
 
 function renderTeacherResultActions(result) {
   const downloads = (result.attachments || []).map((attachment, index) => `
-    <button class="download-attachment-btn" onclick="window.downloadExamAttachment('${attachment.id}')">
+    <button class="download-attachment-btn" onclick="event.stopPropagation(); window.downloadExamAttachment('${attachment.id}')">
       Baixar ZIP${result.attachments.length > 1 ? ` ${index + 1}` : ''}
     </button>
   `).join('');
   const missing = result.manualReviewCount > 0 && !result.attachments?.length
     ? '<span class="attachment-missing-label">ZIP não entregue</span>'
     : '';
-  return `${downloads}${missing}<button class="delete-result-log-btn" onclick="window.deleteExamResultLog('${result.id}')">Excluir log</button>`;
+  return `${downloads}${missing}<button class="delete-result-log-btn" onclick="event.stopPropagation(); window.deleteExamResultLog('${result.id}')">Excluir log</button>`;
+}
+
+function renderTeacherResultReview(result) {
+  const essayFeedback = (result.feedback || []).filter(item => item.requiresEssayReview);
+  const zipFeedback = (result.feedback || []).filter(item => item.requiresManualReview);
+  const finalized = result.finalGradeReady && result.essayQuestionCount > 0;
+  const allReviewed = result.pendingEssayReviewCount === 0 && essayFeedback.length > 0;
+  const mainContent = document.getElementById('main-content');
+  mainContent.innerHTML = `
+    <section class="exam-page teacher-result-review-page">
+      <div class="exam-page-heading results-heading">
+        <div>
+          <span class="eyebrow">Correção individual</span>
+          <h2>${escapeHtml(`${result.firstName} ${result.lastName}`)}</h2>
+          <p>${escapeHtml(result.examTitle || 'Prova')} · ${escapeHtml([result.className, result.subjectName].filter(Boolean).join(' · '))}</p>
+        </div>
+        <button class="secondary-btn" onclick="window.closeExamResultReview()">Voltar aos resultados</button>
+      </div>
+      ${state.examResultsMessage ? `<div class="exam-alert ${state.examResultsMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.examResultsMessage)}</div>` : ''}
+      <div class="review-score-summary">
+        <div><span>Questões objetivas</span><strong>${result.autoGradedCount ? `${result.correctCount}/${result.autoGradedCount}` : '—'}</strong><small>${result.percentage === null ? 'Sem objetivas' : `${result.percentage}% provisório`}</small></div>
+        <div><span>Dissertativas</span><strong>${result.approvedEssayCount}/${result.essayQuestionCount}</strong><small>${finalized ? 'Correção finalizada' : `${result.reviewedEssayCount} corrigidas`}</small></div>
+        <div class="${finalized ? 'finalized' : ''}"><span>Nota definitiva</span><strong>${finalized ? `${result.finalPercentage}%` : 'Pendente'}</strong><small>${finalized ? `${result.finalCorrectCount}/${result.finalGradedQuestionCount} pontos` : 'Use o botão após corrigir todas'}</small></div>
+      </div>
+      ${essayFeedback.length ? `
+        <div class="essay-review-list">
+          ${essayFeedback.map((item, index) => {
+            const decision = item.essayDecision;
+            return `
+              <article class="essay-review-card ${decision || 'pending'}">
+                <div class="essay-review-card-heading">
+                  <span>Dissertativa ${index + 1}</span>
+                  <strong>${decision === 'approved' ? '✓ Aprovada' : decision === 'rejected' ? '✕ Incorreta' : 'Pendente'}</strong>
+                </div>
+                <h3>${escapeHtml(item.prompt)}</h3>
+                <div class="student-written-answer">${escapeHtml(item.studentAnswer || 'Não respondida')}</div>
+                <div class="essay-decision-actions">
+                  <button type="button" class="approve-essay-btn ${decision === 'approved' ? 'selected' : ''}"
+                    onclick="window.setEssayReviewDecision('${result.id}', '${item.questionId}', 'approved')"
+                    ${state.examReviewSaving || finalized ? 'disabled' : ''}>✓ Aprovar resposta</button>
+                  <button type="button" class="reject-essay-btn ${decision === 'rejected' ? 'selected' : ''}"
+                    onclick="window.setEssayReviewDecision('${result.id}', '${item.questionId}', 'rejected')"
+                    ${state.examReviewSaving || finalized ? 'disabled' : ''}>✕ Marcar incorreta</button>
+                </div>
+              </article>
+            `;
+          }).join('')}
+        </div>
+        <div class="finalize-grade-panel">
+          <div><strong>${finalized ? 'Nota final contabilizada' : allReviewed ? 'Todas as dissertativas foram corrigidas' : 'Correção ainda incompleta'}</strong><p>${finalized ? `Resultado definitivo: ${result.finalPercentage}%.` : 'A nota objetiva é provisória até a confirmação final do professor.'}</p></div>
+          <button class="next-btn" onclick="window.finalizeEssayResult('${result.id}')"
+            ${!allReviewed || finalized || state.examReviewSaving ? 'disabled' : ''}>${finalized ? 'Nota contabilizada' : 'Contabilizar nota final'}</button>
+        </div>
+      ` : '<div class="exam-empty"><h3>Sem questões dissertativas</h3><p>Este resultado não exige correção textual.</p></div>'}
+      ${zipFeedback.length ? `<div class="zip-review-note"><strong>Anexos ZIP</strong><p>Os anexos continuam disponíveis para revisão separada e não entram na nota objetiva + dissertativa.</p><div class="result-action-list">${renderTeacherResultActions(result)}</div></div>` : ''}
+    </section>
+  `;
 }
 
 function renderTeacherResults() {
   const mainContent = document.getElementById('main-content');
+  if (state.reviewingExamResultId) {
+    const selectedResult = state.examResults.find(result => result.id === state.reviewingExamResultId);
+    if (selectedResult) {
+      renderTeacherResultReview(selectedResult);
+      return;
+    }
+    state.reviewingExamResultId = null;
+  }
   if (state.examResultsStatus === 'idle') {
     state.examResultsStatus = 'loading';
     queueMicrotask(loadTeacherResults);
@@ -2661,23 +2880,20 @@ function renderTeacherResults() {
     : state.examResultsStatus === 'error'
       ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.examResultsMessage)}</p><button class="next-btn" onclick="window.refreshExamResults()">Tentar novamente</button></div>`
       : filteredResults.length
-        ? `
-          <div class="results-table-wrap">
-            <table class="results-table">
-              <thead><tr><th>Aluno</th><th>Prova</th><th>Tempo total</th><th>Nota</th><th>Enviada em</th><th>Ações</th></tr></thead>
-              <tbody>
-                ${filteredResults.map(result => `
-                  <tr>
-                    <td><strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong><small>${escapeHtml(result.userEmail || '')}</small></td>
-                    <td>${escapeHtml(result.examTitle || 'Prova')}<small>${escapeHtml([result.className, result.subjectName].filter(Boolean).join(' · ') || 'Dados acadêmicos não informados')}</small></td>
-                    <td>${formatExamTime(result.elapsedSeconds)}</td>
-                    <td>${renderTeacherResultGrade(result)}</td>
-                    <td>${formatExamDate(result.submittedAtMillis)}</td>
-                    <td><div class="result-action-list">${renderTeacherResultActions(result)}</div></td>
-                  </tr>
-                `).join('')}
-              </tbody>
-            </table>
+        ? `<div class="teacher-result-card-grid">
+            ${filteredResults.map(result => `
+              <article class="teacher-result-card" role="button" tabindex="0"
+                onclick="window.openExamResultReview('${result.id}')"
+                onkeydown="if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); window.openExamResultReview('${result.id}'); }">
+                <div class="teacher-result-card-topline"><span>${escapeHtml(result.examTitle || 'Prova')}</span><time>${formatExamDate(result.submittedAtMillis)}</time></div>
+                <h3>${escapeHtml(`${result.firstName} ${result.lastName}`)}</h3>
+                <p>${escapeHtml(result.userEmail || '')}</p>
+                <div class="exam-academic-meta"><span>${escapeHtml(result.className || 'Turma não informada')}</span><span>${escapeHtml(result.subjectName || 'Matéria não informada')}</span></div>
+                <div class="teacher-result-card-score">${renderTeacherResultGrade(result)}</div>
+                <div class="teacher-result-card-footer"><span>Tempo: <strong>${formatExamTime(result.elapsedSeconds)}</strong></span><span>Abrir correção →</span></div>
+                <div class="result-action-list">${renderTeacherResultActions(result)}</div>
+              </article>
+            `).join('')}
           </div>`
         : state.examResults.length
           ? '<div class="exam-empty filtered-results-empty"><h3>Nenhum resultado encontrado</h3><p>Altere ou limpe os filtros para visualizar outros resultados.</p></div>'
@@ -2686,7 +2902,7 @@ function renderTeacherResults() {
   mainContent.innerHTML = `
     <section class="exam-page teacher-results-page">
       <div class="exam-page-heading results-heading">
-        <div><span class="eyebrow">Área do professor</span><h2>Dashboard de Resultados</h2><p>Filtre notas e duração por turma, matéria e aluno.</p></div>
+        <div><span class="eyebrow">Área do professor</span><h2>Dashboard de Resultados</h2><p>Clique no card de um aluno para corrigir as respostas e contabilizar a nota final.</p></div>
         <button class="secondary-btn" onclick="window.refreshExamResults()">Atualizar</button>
       </div>
       ${state.examResultsMessage ? `<div class="exam-alert ${state.examResultsMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.examResultsMessage)}</div>` : ''}
@@ -2937,9 +3153,9 @@ function renderActiveExam(mainContent) {
             <h3>${escapeHtml(question.prompt)}</h3>
             ${getExamQuestionType(question) === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
               ? renderStudentZipAttachment(question, index)
-              : Array.isArray(question.options) && question.options.length >= 2
-                ? renderStudentExamOptions(question, index)
-                : `<label class="exam-field"><span>Sua resposta</span><textarea rows="4" maxlength="5000" placeholder="Digite sua resposta" oninput="window.updateStudentExamAnswer(${index}, this.value)">${escapeHtml(state.examAnswers[index]?.value || '')}</textarea></label>`}
+              : getExamQuestionType(question) === EXAM_QUESTION_TYPES.ESSAY
+                ? `<div class="student-essay-answer"><span class="manual-review-pill">Correção pelo professor</span><label class="exam-field"><span>Sua resposta dissertativa</span><textarea rows="7" maxlength="5000" placeholder="Desenvolva sua resposta" oninput="window.updateStudentExamAnswer(${index}, this.value)">${escapeHtml(state.examAnswers[index]?.value || '')}</textarea></label></div>`
+                : renderStudentExamOptions(question, index)}
           </article>
         `).join('')}
         ${state.examMessage ? `<div class="exam-alert error" role="alert">${escapeHtml(state.examMessage)}</div>` : ''}
@@ -2953,32 +3169,49 @@ function renderActiveExam(mainContent) {
 function renderExamResult(mainContent) {
   const result = state.examAttempt;
   const feedback = result.feedback || [];
-  const hasManualReview = result.manualReviewCount > 0;
+  const hasPendingEssayReview = result.essayQuestionCount > 0 && !result.finalGradeReady;
+  const hasZipReview = result.manualReviewCount > 0;
   const automaticSummary = result.autoGradedCount > 0
-    ? `Nas questões objetivas, você acertou <strong>${result.correctCount}</strong> de <strong>${result.autoGradedCount}</strong>.`
-    : 'Esta avaliação será analisada pelo professor.';
+    ? `Nas questões objetivas, você acertou <strong>${result.correctCount}</strong> de <strong>${result.autoGradedCount}</strong>${result.percentage === null ? '' : ` (${result.percentage}%)`}.`
+    : 'Esta avaliação não possui questões objetivas.';
   mainContent.innerHTML = `
     <section class="exam-page exam-result-page">
-      <div class="exam-result-summary ${hasManualReview ? 'manual-review-summary' : ''}">
-        <span class="eyebrow">${hasManualReview ? 'Prova enviada' : 'Prova corrigida'}</span>
+      <div class="exam-result-summary ${hasPendingEssayReview || hasZipReview ? 'manual-review-summary' : ''}">
+        <span class="eyebrow">${hasPendingEssayReview ? 'Aguardando o professor' : 'Resultado da prova'}</span>
         <h2>${escapeHtml(state.exam.title)}</h2>
-        ${hasManualReview
-          ? '<div class="result-grade manual">Em revisão</div>'
-          : `<div class="result-grade">${result.percentage}%</div>`}
-        <p>${hasManualReview
-          ? `${automaticSummary} ${result.manualReviewCount} resposta(s) com anexo aguardam revisão manual.`
-          : `Você acertou <strong>${result.correctCount}</strong> de <strong>${result.totalQuestions}</strong> questões.`}</p>
+        ${hasPendingEssayReview
+          ? '<div class="result-grade manual">Nota pendente</div>'
+          : result.finalPercentage !== null
+            ? `<div class="result-grade">${result.finalPercentage}%</div>`
+            : '<div class="result-grade manual">Em revisão</div>'}
+        <p>${hasPendingEssayReview
+          ? `${automaticSummary} A nota definitiva será exibida após o professor corrigir ${result.essayQuestionCount} questão(ões) dissertativa(s) e contabilizar o resultado.`
+          : result.finalPercentage !== null
+            ? `Nota definitiva: <strong>${result.finalCorrectCount}</strong> de <strong>${result.finalGradedQuestionCount}</strong> pontos.`
+            : automaticSummary}</p>
+        ${hasZipReview ? '<p class="zip-result-note">O anexo ZIP permanece disponível para revisão separada e não compõe esta nota.</p>' : ''}
         <div class="result-meta"><span>Tempo total: <strong>${formatExamTime(result.elapsedSeconds)}</strong></span><span>Aluno: <strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong></span></div>
+        ${hasPendingEssayReview ? '<button class="secondary-btn result-back-btn" onclick="window.reloadExamPortal()">Atualizar correção</button>' : ''}
         <button class="secondary-btn result-back-btn" onclick="window.backToStudentExamCatalog()">Voltar às provas</button>
       </div>
       <div class="feedback-list">
         <h3>Feedback da avaliação</h3>
         ${feedback.map((item, index) => {
+          if (item.requiresEssayReview) {
+            const finalized = result.finalGradeReady;
+            return `
+              <article class="feedback-card ${finalized ? (item.isCorrect ? 'correct' : 'incorrect') : 'manual-review'}">
+                <div class="feedback-status">${finalized ? (item.isCorrect ? '✓ Aprovada pelo professor' : '✕ Marcada incorreta pelo professor') : '◷ Aguardando correção do professor'}</div>
+                <h4>${index + 1}. ${escapeHtml(item.prompt)}</h4>
+                <p><span>Sua resposta:</span> ${escapeHtml(item.studentAnswer || 'Não respondida')}</p>
+              </article>
+            `;
+          }
           if (item.requiresManualReview) {
             const attachment = state.examAttachments[item.questionId];
             return `
               <article class="feedback-card manual-review">
-                <div class="feedback-status">◷ Aguardando revisão manual</div>
+                <div class="feedback-status">◷ Anexo em revisão separada</div>
                 <h4>${index + 1}. ${escapeHtml(item.prompt)}</h4>
                 ${attachment?.status === 'ready'
                   ? `<p><span>Arquivo entregue:</span> ${escapeHtml(attachment.fileName)} · ${formatAttachmentSize(attachment.size)}</p>`
@@ -3270,9 +3503,12 @@ window.updateTeacherQuestion = (index, field, value) => {
 window.changeTeacherQuestionType = (index, type) => {
   const current = state.teacherQuestions[index];
   if (!current || getExamQuestionType(current) === type) return;
-  state.teacherQuestions[index] = type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
-    ? { ...createZipAttachmentDraft(), prompt: current.prompt || '' }
-    : { ...createMultipleChoiceDraft(), prompt: current.prompt || '' };
+  const draft = type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
+    ? createZipAttachmentDraft()
+    : type === EXAM_QUESTION_TYPES.ESSAY
+      ? createEssayDraft()
+      : createMultipleChoiceDraft();
+  state.teacherQuestions[index] = { ...draft, prompt: current.prompt || '' };
   renderTeacherExamCreator();
 };
 
@@ -3371,6 +3607,13 @@ window.startEditingExam = async examId => {
         prompt: question.prompt
       };
     }
+    if (type === EXAM_QUESTION_TYPES.ESSAY) {
+      return {
+        id: question.id,
+        ...createEssayDraft(),
+        prompt: question.prompt
+      };
+    }
 
     const options = Array.isArray(question.options) && question.options.length >= 2
       ? [...question.options]
@@ -3445,7 +3688,9 @@ window.changeEditingExamQuestionType = (index, type) => {
   if (!current || getExamQuestionType(current) === type) return;
   const draft = type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT
     ? createZipAttachmentDraft()
-    : createMultipleChoiceDraft();
+    : type === EXAM_QUESTION_TYPES.ESSAY
+      ? createEssayDraft()
+      : createMultipleChoiceDraft();
   state.editingExamQuestions[index] = {
     id: current.id || null,
     ...draft,
@@ -3587,6 +3832,57 @@ window.deleteRegisteredExam = async examId => {
   renderTeacherExamManager();
 };
 
+window.openExamResultReview = resultId => {
+  if (!state.examResults.some(result => result.id === resultId)) return;
+  state.reviewingExamResultId = resultId;
+  state.examResultsMessage = '';
+  renderTeacherResults();
+};
+
+window.closeExamResultReview = () => {
+  state.reviewingExamResultId = null;
+  state.examResultsMessage = '';
+  renderTeacherResults();
+};
+
+window.setEssayReviewDecision = async (resultId, questionId, decision) => {
+  if (state.examReviewSaving) return;
+  state.examReviewSaving = true;
+  state.examResultsMessage = '';
+  renderTeacherResults();
+  try {
+    await callExamApi('reviewEssayAnswer', { resultId, questionId, decision });
+    state.examResultsStatus = 'loading';
+    await loadTeacherResults();
+  } catch (error) {
+    state.examResultsStatus = 'ready';
+    state.examResultsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível salvar a correção.')}`;
+  } finally {
+    state.examReviewSaving = false;
+    renderTeacherResults();
+  }
+};
+
+window.finalizeEssayResult = async resultId => {
+  if (state.examReviewSaving) return;
+  if (!window.confirm('Contabilizar a nota final? Depois disso, as decisões desta correção não poderão ser alteradas.')) return;
+  state.examReviewSaving = true;
+  state.examResultsMessage = '';
+  renderTeacherResults();
+  try {
+    const response = await callExamApi('finalizeEssayReview', { resultId });
+    state.examResultsMessage = `Nota final contabilizada: ${response.finalScore}%.`;
+    state.examResultsStatus = 'loading';
+    await loadTeacherResults();
+  } catch (error) {
+    state.examResultsStatus = 'ready';
+    state.examResultsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível contabilizar a nota final.')}`;
+  } finally {
+    state.examReviewSaving = false;
+    renderTeacherResults();
+  }
+};
+
 window.downloadExamAttachment = async attachmentId => {
   state.examResultsMessage = 'Preparando o download do arquivo ZIP...';
   renderTeacherResults();
@@ -3617,6 +3913,7 @@ window.deleteExamResultLog = async resultId => {
 };
 
 window.refreshExamResults = () => {
+  state.reviewingExamResultId = null;
   state.examResultsMessage = '';
   state.examResultsStatus = 'idle';
   renderTeacherResults();
