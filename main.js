@@ -476,7 +476,9 @@ async function submitExamOnFreeTier(data) {
 async function listExamResultsOnFreeTier() {
   if (!isAdmin()) throw new Error('Área exclusiva do professor.');
   const attemptsSnapshot = await db.collection('examAttempts').get();
-  const submitted = attemptsSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })).filter(item => item.status === 'submitted');
+  const submitted = attemptsSnapshot.docs
+    .map(doc => ({ id: doc.id, ...doc.data() }))
+    .filter(item => item.status === 'submitted' && item.logDeleted !== true);
   const examIds = [...new Set(submitted.map(item => item.examId))];
   const examDocs = await Promise.all(examIds.map(id => db.collection('exams').doc(id).get()));
   const exams = new Map(examDocs.filter(doc => doc.exists).map(doc => [doc.id, serializeExamDocument(doc)]));
@@ -503,6 +505,22 @@ async function listExamResultsOnFreeTier() {
   return { results };
 }
 
+async function deleteExamResultLogOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const resultId = String(data.resultId || '');
+  const attemptRef = db.collection('examAttempts').doc(resultId);
+  const attemptDoc = await attemptRef.get();
+  if (!attemptDoc.exists || attemptDoc.data().status !== 'submitted') {
+    throw new Error('Log de resultado não encontrado.');
+  }
+  if (attemptDoc.data().logDeleted === true) return { ok: true };
+  await attemptRef.update({
+    logDeleted: true,
+    logDeletedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true };
+}
+
 const freeTierApi = {
   createExam: createExamOnFreeTier,
   listRegisteredExams: listRegisteredExamsOnFreeTier,
@@ -514,7 +532,8 @@ const freeTierApi = {
   startExam: startExamOnFreeTier,
   saveExamAnswers: saveExamAnswersOnFreeTier,
   submitExam: submitExamOnFreeTier,
-  listExamResults: listExamResultsOnFreeTier
+  listExamResults: listExamResultsOnFreeTier,
+  deleteExamResultLog: deleteExamResultLogOnFreeTier
 };
 
 async function callExamApi(name, data = {}) {
@@ -616,6 +635,7 @@ const state = {
   teacherMessage: '',
   examResults: [],
   examResultsStatus: 'idle',
+  examResultsMessage: '',
   teacherExams: [],
   teacherExamsStatus: 'idle',
   teacherExamsMessage: '',
@@ -1592,7 +1612,7 @@ function renderTeacherResults() {
         ? `
           <div class="results-table-wrap">
             <table class="results-table">
-              <thead><tr><th>Aluno</th><th>Prova</th><th>Tempo total</th><th>Nota</th><th>Enviada em</th></tr></thead>
+              <thead><tr><th>Aluno</th><th>Prova</th><th>Tempo total</th><th>Nota</th><th>Enviada em</th><th>Ações</th></tr></thead>
               <tbody>
                 ${state.examResults.map(result => `
                   <tr>
@@ -1601,6 +1621,7 @@ function renderTeacherResults() {
                     <td>${formatExamTime(result.elapsedSeconds)}</td>
                     <td><span class="grade-pill">${result.correctCount}/${result.totalQuestions} · ${result.percentage}%</span></td>
                     <td>${formatExamDate(result.submittedAtMillis)}</td>
+                    <td><button class="delete-result-log-btn" onclick="window.deleteExamResultLog('${result.id}')">Excluir log</button></td>
                   </tr>
                 `).join('')}
               </tbody>
@@ -1614,6 +1635,7 @@ function renderTeacherResults() {
         <div><span class="eyebrow">Área do professor</span><h2>Dashboard de Resultados</h2><p>Acompanhe notas e duração das avaliações enviadas.</p></div>
         <button class="secondary-btn" onclick="window.refreshExamResults()">Atualizar</button>
       </div>
+      ${state.examResultsMessage ? `<div class="exam-alert ${state.examResultsMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.examResultsMessage)}</div>` : ''}
       ${content}
     </section>
   `;
@@ -2127,7 +2149,25 @@ window.deleteRegisteredExam = async examId => {
   renderTeacherExamManager();
 };
 
+window.deleteExamResultLog = async resultId => {
+  const result = state.examResults.find(item => item.id === resultId);
+  if (!result) return;
+  const studentName = `${result.firstName} ${result.lastName}`.trim();
+  const confirmed = window.confirm(`Excluir o log de ${studentName} na prova "${result.examTitle || 'Prova'}"? A tentativa e o resultado do aluno serão preservados.`);
+  if (!confirmed) return;
+  state.examResultsMessage = '';
+  try {
+    await callExamApi('deleteExamResultLog', { resultId });
+    state.examResults = state.examResults.filter(item => item.id !== resultId);
+    state.examResultsMessage = 'Log excluído do dashboard. A tentativa do aluno foi preservada.';
+  } catch (error) {
+    state.examResultsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível excluir o log.')}`;
+  }
+  renderTeacherResults();
+};
+
 window.refreshExamResults = () => {
+  state.examResultsMessage = '';
   state.examResultsStatus = 'idle';
   renderTeacherResults();
 };

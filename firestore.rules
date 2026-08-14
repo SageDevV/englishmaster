@@ -78,6 +78,16 @@ service cloud.firestore {
         && (validSave || validSubmission);
     }
 
+    function validAdminLogDeletion() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return isAdmin()
+        && resource.data.status == 'submitted'
+        && request.resource.data.logDeleted == true
+        && request.resource.data.logDeletedAt is timestamp
+        && request.resource.data.logDeletedAt == request.time
+        && changed.hasOnly(['logDeleted', 'logDeletedAt']);
+    }
+
     match /users/{userId} {
       allow read: if signedIn();
       allow create, update: if ownsUser(userId);
@@ -104,8 +114,8 @@ service cloud.firestore {
       allow list: if isAdmin();
       allow create: if signedIn() && validAttemptCreate(attemptId);
       allow update: if signedIn()
-        && resource.data.userId == request.auth.uid
-        && validAttemptUpdate();
+        && ((resource.data.userId == request.auth.uid && validAttemptUpdate())
+          || validAdminLogDeletion());
       allow delete: if false;
     }
   }

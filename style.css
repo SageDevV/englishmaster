@@ -2623,3 +2623,23 @@ body[data-module="english-master"] .survivor-mode {
   .english-module-header { align-items: stretch; flex-direction: column; }
   .module-back-btn { width: 100%; }
 }
+
+
+.delete-result-log-btn {
+  padding: 0.5rem 0.7rem;
+  border: 1px solid rgba(239, 68, 68, 0.4);
+  border-radius: 0.5rem;
+  color: #fecaca;
+  background: rgba(239, 68, 68, 0.08);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 800;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: 0.2s ease;
+}
+
+.delete-result-log-btn:hover {
+  border-color: rgba(248, 113, 113, 0.7);
+  background: rgba(239, 68, 68, 0.18);
+}
