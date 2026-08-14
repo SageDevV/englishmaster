@@ -1105,13 +1105,6 @@ function updateHeader() {
     <nav class="app-nav" aria-label="Navegação principal">
       <button class="nav-btn ${state.currentView === 'hub' ? 'active' : ''}" onclick="window.navigateTo('hub')">Hub</button>
       <button class="nav-btn ${isEnglishMasterView() ? 'active' : ''}" onclick="window.navigateTo('english-master')">English Master</button>
-      ${isAdmin() ? `
-        <button class="nav-btn ${state.currentView === 'teacher-create' ? 'active' : ''}" onclick="window.navigateTo('teacher-create')">Criação de Prova</button>
-        <button class="nav-btn ${state.currentView === 'teacher-exams' ? 'active' : ''}" onclick="window.navigateTo('teacher-exams')">Provas cadastradas</button>
-        <button class="nav-btn ${state.currentView === 'teacher-results' ? 'active' : ''}" onclick="window.navigateTo('teacher-results')">Resultados</button>
-      ` : `
-        <button class="nav-btn ${state.currentView === 'exam' ? 'active' : ''}" onclick="window.navigateTo('exam')">${state.examScreen === 'locked' ? '🔒 ' : ''}Prova</button>
-      `}
     </nav>
 
     <div class="user-stats">

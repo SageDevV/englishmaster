@@ -241,7 +241,7 @@ h1 {
 
 .xp-bar-fill {
   height: 100%;
-  background: linear-gradient(90deg, var(--primary), #ff8080);
+  background: linear-gradient(90deg, var(--primary), var(--secondary));
   width: 0%;
   transition: width 1s cubic-bezier(0.175, 0.885, 0.32, 1.275);
   box-shadow: 0 0 10px var(--primary);
@@ -387,7 +387,7 @@ h1 {
 .topic-card:hover:not(.locked) {
   transform: translateY(-8px);
   border-color: var(--primary);
-  box-shadow: 0 0 30px rgba(255, 0, 0, 0.2);
+  box-shadow: 0 0 30px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 
 .topic-card.locked {
@@ -469,7 +469,7 @@ h1 {
 
 .progress-bar-fill {
   height: 100%;
-  background: linear-gradient(to right, #ff0000, #ffffff);
+  background: linear-gradient(to right, var(--primary), var(--secondary));
   width: 0%;
   transition: width 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -488,13 +488,13 @@ h1 {
   position: absolute;
   top: -15px;
   right: 20px;
-  background: linear-gradient(135deg, #ff0000, #ffffff);
+  background: linear-gradient(135deg, var(--primary), var(--secondary));
   color: black;
   padding: 0.4rem 1rem;
   border-radius: 0.5rem;
   font-weight: 900;
   font-size: 1rem;
-  box-shadow: 0 0 20px rgba(255, 0, 0, 0.5);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--primary) 38%, transparent);
   border: 2px solid white;
   animation: bounce 0.5s infinite alternate;
   display: none;
@@ -607,9 +607,9 @@ h1 {
 .next-btn {
   margin-top: 2rem;
   width: 100%;
-  background: #ff0000;
+  background: linear-gradient(135deg, var(--primary), var(--primary-dark));
   color: white;
-  border: 2px solid white;
+  border: 1px solid color-mix(in srgb, var(--secondary) 52%, white 12%);
   padding: 1.2rem;
   border-radius: 0.5rem;
   font-size: 1.1rem;
@@ -618,12 +618,19 @@ h1 {
   transition: all 0.2s;
   text-transform: uppercase;
   letter-spacing: 1px;
+  box-shadow: 0 12px 28px color-mix(in srgb, var(--primary) 22%, transparent);
 }
 
-.next-btn:hover {
-  background: #cc0000;
-  box-shadow: 0 0 30px rgba(255, 0, 0, 0.5);
+.next-btn:hover:not(:disabled) {
+  background: linear-gradient(135deg, var(--secondary), var(--primary));
+  border-color: color-mix(in srgb, var(--secondary) 75%, white 20%);
+  box-shadow: 0 0 30px color-mix(in srgb, var(--primary) 38%, transparent);
   transform: translateY(-2px);
+}
+
+.next-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .result-screen {
@@ -749,7 +756,7 @@ h1 {
   background: var(--primary);
   border-color: #fff;
   color: #fff;
-  box-shadow: 0 0 18px rgba(255, 0, 0, 0.35);
+  box-shadow: 0 0 18px color-mix(in srgb, var(--primary) 35%, transparent);
 }
 
 .leaderboard-header {
@@ -798,7 +805,7 @@ h1 {
 
 .leaderboard-row.current-student {
   border-color: var(--primary);
-  background: rgba(255, 0, 0, 0.12);
+  background: color-mix(in srgb, var(--primary) 12%, transparent);
 }
 
 .rank-position {
@@ -841,7 +848,7 @@ h1 {
   position: relative;
   overflow: hidden;
   transition: all 0.3s;
-  box-shadow: 0 0 20px rgba(255, 0, 0, 0.1);
+  box-shadow: 0 0 20px color-mix(in srgb, var(--primary) 16%, transparent);
 }
 
 .speedrun-banner {
@@ -1332,7 +1339,7 @@ h1 {
 }
 
 .eyebrow {
-  color: #fca5a5;
+  color: var(--secondary);
   font-size: 0.78rem;
   font-weight: 900;
   letter-spacing: 0.12em;
@@ -1379,7 +1386,7 @@ h1 {
 .exam-field input:focus,
 .exam-field textarea:focus {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(255, 71, 71, 0.12);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
 }
 
 .builder-heading {
@@ -1468,7 +1475,7 @@ h1 {
 .secondary-btn:hover,
 .remove-question-btn:not(:disabled):hover {
   border-color: var(--primary);
-  background: rgba(255, 71, 71, 0.1);
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
 }
 
 .confirm-exam-btn,
@@ -1614,10 +1621,10 @@ h1 {
   display: grid;
   gap: 0.2rem;
   padding: 0.75rem 1rem;
-  border: 1px solid rgba(255, 71, 71, 0.5);
+  border: 1px solid color-mix(in srgb, var(--primary) 50%, transparent);
   border-radius: 0.75rem;
   text-align: right;
-  background: rgba(255, 71, 71, 0.08);
+  background: color-mix(in srgb, var(--primary) 8%, transparent);
 }
 
 .exam-countdown span {
@@ -2072,7 +2079,7 @@ h1 {
 
 .alternative-editor-row > input:focus {
   border-color: var(--primary);
-  box-shadow: 0 0 0 3px rgba(255, 71, 71, 0.1);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 14%, transparent);
 }
 
 .correct-choice-control {
