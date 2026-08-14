@@ -48,9 +48,18 @@ function findActive(items, id, label) {
   return item;
 }
 
+export function getSubjectsForClass(subjects = [], classId = '') {
+  return subjects.filter(subject => subject.classId === String(classId || '')
+    && subject.deleted !== true
+    && subject.active !== false);
+}
+
 export function validateAcademicSelection(data = {}, classes = [], subjects = []) {
   const academicClass = findActive(classes, data.classId, 'uma turma válida');
   const subject = findActive(subjects, data.subjectId, 'uma matéria válida');
+  if (subject.classId !== academicClass.id) {
+    throw new Error('A matéria selecionada não pertence à turma informada.');
+  }
   return {
     classId: academicClass.id,
     className: academicClass.name,

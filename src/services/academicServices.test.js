@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   DEFAULT_ACADEMIC_CLASSES,
   getProfileClassId,
+  getSubjectsForClass,
   mergeAcademicClasses,
   normalizeAcademicKey,
   validateAcademicEntityName,
@@ -10,7 +11,13 @@ import {
   validateStudyReference
 } from './academicServices.js';
 
-const subjects = [{ id: 'subject-1', name: 'Desenvolvimento Web', active: true }];
+const subjects = [{
+  id: 'subject-1',
+  name: 'Desenvolvimento Web',
+  classId: 'entra21',
+  className: 'Entra21',
+  active: true
+}];
 
 describe('academic model', () => {
   it('normalizes names and preserves default classes', () => {
@@ -38,6 +45,16 @@ describe('academic model', () => {
     );
     assert.equal(result.className, 'Entra21');
     assert.equal(result.subjectName, 'Desenvolvimento Web');
+    assert.deepEqual(getSubjectsForClass(subjects, 'entra21').map(item => item.id), ['subject-1']);
+    assert.equal(getSubjectsForClass(subjects, 'jovemprogramador').length, 0);
+    assert.throws(
+      () => validateAcademicSelection(
+        { classId: 'jovemprogramador', subjectId: 'subject-1' },
+        DEFAULT_ACADEMIC_CLASSES,
+        subjects
+      ),
+      /não pertence à turma/
+    );
     assert.throws(
       () => validateAcademicSelection({ classId: 'missing', subjectId: 'subject-1' }, DEFAULT_ACADEMIC_CLASSES, subjects),
       /turma válida/

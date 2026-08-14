@@ -185,7 +185,12 @@ service cloud.firestore {
     }
 
     match /academicSubjects/{subjectId} {
-      allow read: if signedIn();
+      allow read: if isAdmin()
+        || (signedIn()
+          && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.classId == resource.data.classId)
+            || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.className == resource.data.className)));
       allow create, update: if isAdmin();
       allow delete: if false;
     }
@@ -212,7 +217,12 @@ service cloud.firestore {
     // O gabarito é armazenado apenas como hashes SHA-256. Leituras exigem login
     // e somente o professor identificado pode criar, publicar ou arquivar provas.
     match /exams/{examId} {
-      allow read: if signedIn();
+      allow read: if isAdmin()
+        || (signedIn()
+          && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.classId == resource.data.classId)
+            || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.className == resource.data.className)));
       allow create, update: if isAdmin();
       allow delete: if false;
     }

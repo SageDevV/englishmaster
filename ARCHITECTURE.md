@@ -78,13 +78,17 @@ Novos componentes devem consumir essas variáveis em vez de cores fixas. Cores s
 O professor administra o catálogo compartilhado usando duas coleções com arquivamento lógico:
 
 - `academicClasses`: turmas adicionais; `Entra21` (`entra21`) e `JovemProgramador` (`jovemprogramador`) permanecem disponíveis como defaults da aplicação.
-- `academicSubjects`: matérias utilizadas nas referências e avaliações.
+- `academicSubjects`: matérias vinculadas obrigatoriamente a uma turma por `classId/className`, utilizadas nas referências e avaliações.
 
 Cada item armazena `name`, `nameKey`, `active`, `deleted`, autoria e timestamps. Somente o professor pode criar ou atualizar; usuários autenticados podem ler o catálogo para preencher seus formulários.
 
+Cada matéria só aparece nos formulários de prova e referência quando pertence à turma selecionada. A validação de domínio rejeita qualquer combinação em que `academicSubjects.classId` seja diferente da turma informada.
+
 As referências ficam em `studyReferences` e contêm título, descrição, URL, `classId/className` e `subjectId/subjectName`. O aluno consulta apenas documentos ativos da própria `studentProfile.classId`; perfis antigos sem `classId` são migrados por correspondência normalizada de `className`.
 
-Novas provas exigem turma e matéria. O documento da prova preserva os quatro campos acadêmicos e a aplicação mantém uma prova ativa independente por turma. A regra de criação da tentativa confirma que a turma do perfil corresponde à turma da prova, mantendo compatibilidade com avaliações legadas sem `classId`.
+Novas provas exigem turma e matéria. O documento da prova preserva os quatro campos acadêmicos e a aplicação mantém uma prova ativa independente por turma. A área de provas do aluno funciona como catálogo da sua turma, exibindo totais disponíveis, bloqueados e gerais; provas bloqueadas não podem ser abertas, exceto quando já existe uma tentativa própria para continuidade ou consulta do resultado.
+
+O isolamento por turma é uma regra global de conteúdo: consultas de `academicSubjects`, `studyReferences` e `exams` são filtradas por `classId`, e as regras Firestore repetem a mesma autorização. Assim, manipular rotas ou chamadas no navegador não permite ler matérias, referências ou provas de outra turma. A regra de criação da tentativa também confirma que a turma do perfil corresponde à turma da prova.
 
 ## Perfil global do aluno
 

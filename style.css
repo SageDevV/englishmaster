@@ -3271,3 +3271,107 @@ body[data-module="english-master"] .survivor-mode {
     width: 100%;
   }
 }
+
+
+
+/* --- Subjects by class and student exam catalog --- */
+.subject-registration-form {
+  grid-template-columns: minmax(150px, 0.8fr) minmax(0, 1fr) auto;
+}
+
+.exam-catalog-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.exam-catalog-summary > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  gap: 0.45rem;
+  padding: 0.9rem;
+  border: 1px solid var(--glass-border);
+  border-radius: 0.75rem;
+  color: var(--text-muted);
+  background: rgba(255, 255, 255, 0.025);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.exam-catalog-summary strong {
+  color: #a7f3d0;
+  font-size: 1.35rem;
+}
+
+.exam-catalog-summary .blocked strong {
+  color: #fca5a5;
+}
+
+.student-exam-catalog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+
+.student-exam-catalog-card {
+  display: grid;
+  align-content: start;
+  gap: 0.85rem;
+  padding: 1.25rem;
+  border: 1px solid var(--glass-border);
+  border-radius: 0.9rem;
+  background: rgba(10, 10, 10, 0.84);
+}
+
+.student-exam-catalog-card.active {
+  border-color: rgba(16, 185, 129, 0.42);
+  box-shadow: 0 16px 45px rgba(16, 185, 129, 0.06);
+}
+
+.student-exam-catalog-card.locked {
+  border-color: rgba(239, 68, 68, 0.2);
+}
+
+.student-exam-catalog-card h3 {
+  font-size: 1.2rem;
+  line-height: 1.35;
+}
+
+.student-exam-catalog-card > p {
+  color: var(--text-muted);
+}
+
+.student-exam-catalog-card .next-btn {
+  width: 100%;
+  margin-top: auto;
+}
+
+.catalog-locked-notice {
+  margin-top: auto;
+  padding: 0.75rem;
+  border: 1px solid rgba(239, 68, 68, 0.24);
+  border-radius: 0.6rem;
+  color: #fecaca;
+  background: rgba(239, 68, 68, 0.07);
+  font-size: 0.8rem;
+  font-weight: 800;
+  text-align: center;
+}
+
+.result-back-btn {
+  margin-top: 1.2rem;
+}
+
+@media (max-width: 820px) {
+  .student-exam-catalog-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 640px) {
+  .subject-registration-form,
+  .exam-catalog-summary {
+    grid-template-columns: 1fr;
+  }
+}

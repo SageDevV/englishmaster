@@ -39,6 +39,7 @@ import {
 import {
   DEFAULT_ACADEMIC_CLASSES,
   getProfileClassId,
+  getSubjectsForClass,
   mergeAcademicClasses,
   normalizeAcademicKey,
   validateAcademicEntityName,
@@ -113,6 +114,8 @@ function serializeAcademicDocument(doc) {
     id: doc.id,
     name: data.name,
     nameKey: data.nameKey || normalizeAcademicKey(data.name),
+    classId: data.classId || '',
+    className: data.className || '',
     active: data.active !== false,
     deleted: data.deleted === true,
     builtin: false,
@@ -143,9 +146,17 @@ async function loadAcademicCatalog() {
   if (!state.user) return;
   state.academicStatus = 'loading';
   try {
+    const profileClassId = isAdmin()
+      ? ''
+      : getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses);
+    const subjectsQuery = isAdmin()
+      ? db.collection('academicSubjects')
+      : (profileClassId
+        ? db.collection('academicSubjects').where('classId', '==', profileClassId)
+        : null);
     const [classesSnapshot, subjectsSnapshot] = await Promise.all([
       db.collection('academicClasses').get(),
-      db.collection('academicSubjects').get()
+      subjectsQuery ? subjectsQuery.get() : Promise.resolve({ docs: [] })
     ]);
     state.academicClasses = mergeAcademicClasses(classesSnapshot.docs.map(serializeAcademicDocument));
     state.academicSubjects = subjectsSnapshot.docs
@@ -169,19 +180,31 @@ function getAcademicCollection(kind) {
   throw new Error('Tipo de cadastro acadêmico inválido.');
 }
 
-async function createAcademicEntityOnFreeTier(kind, rawName) {
+async function createAcademicEntityOnFreeTier(kind, rawName, classId = '') {
   if (!isAdmin()) throw new Error('Área exclusiva do professor.');
   const { collection, label } = getAcademicCollection(kind);
   const entity = validateAcademicEntityName(rawName, label);
-  const currentItems = kind === 'class' ? state.academicClasses : state.academicSubjects;
-  if (currentItems.some(item => item.nameKey === entity.nameKey)) {
-    throw new Error(`${label} já cadastrada.`);
+  let classRelation = {};
+  if (kind === 'subject') {
+    const academicClass = state.academicClasses.find(item => item.id === classId && item.active !== false);
+    if (!academicClass) throw new Error('Selecione uma turma válida para a matéria.');
+    classRelation = { classId: academicClass.id, className: academicClass.name };
   }
-  const existing = await db.collection(collection).where('nameKey', '==', entity.nameKey).limit(1).get();
+
+  const currentItems = kind === 'class' ? state.academicClasses : state.academicSubjects;
+  const duplicate = currentItems.some(item => item.nameKey === entity.nameKey
+    && (kind === 'class' || item.classId === classRelation.classId));
+  if (duplicate) throw new Error(`${label} já cadastrada${kind === 'subject' ? ' nesta turma' : ''}.`);
+
+  const existingSnapshot = await db.collection(collection).where('nameKey', '==', entity.nameKey).get();
+  const existingDoc = kind === 'subject'
+    ? existingSnapshot.docs.find(doc => doc.data().classId === classRelation.classId)
+    : existingSnapshot.docs[0];
   const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
-  if (!existing.empty) {
-    await existing.docs[0].ref.update({
+  if (existingDoc) {
+    await existingDoc.ref.update({
       name: entity.name,
+      ...classRelation,
       active: true,
       deleted: false,
       deletedAt: firebase.firestore.FieldValue.delete(),
@@ -190,6 +213,7 @@ async function createAcademicEntityOnFreeTier(kind, rawName) {
   } else {
     await db.collection(collection).add({
       ...entity,
+      ...classRelation,
       active: true,
       deleted: false,
       createdBy: state.user.uid,
@@ -330,32 +354,46 @@ async function serializeAttemptData(data, fallbackExam) {
   return result;
 }
 
-async function getActiveExamDocument(classId) {
-  const snapshot = await db.collection('exams').where('active', '==', true).get();
-  const exactMatches = snapshot.docs.filter(doc => doc.data().classId === classId);
-  const matching = exactMatches.length
-    ? exactMatches
-    : snapshot.docs.filter(doc => !doc.data().classId);
-  if (!matching.length) return null;
-  return matching.sort((a, b) => timestampToMillis(b.data().createdAt) - timestampToMillis(a.data().createdAt))[0];
-}
-
-async function getStudentVisibleExamDocument() {
+async function getStudentExamDocuments() {
   const classId = getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses);
-  const activeExam = await getActiveExamDocument(classId);
-  if (activeExam) return activeExam;
-  const snapshot = await db.collection('exams').get();
-  const available = snapshot.docs.filter(doc => doc.data().deleted !== true);
-  const exactMatches = available.filter(doc => doc.data().classId === classId);
-  const matching = exactMatches.length
-    ? exactMatches
-    : available.filter(doc => !doc.data().classId);
-  return matching
+  if (!classId) return [];
+  const snapshot = await db.collection('exams').where('classId', '==', classId).get();
+  return snapshot.docs
+    .filter(doc => doc.data().deleted !== true)
     .sort((a, b) => {
+      if (a.data().active !== b.data().active) return a.data().active ? -1 : 1;
       const aTime = timestampToMillis(a.data().updatedAt || a.data().createdAt);
       const bTime = timestampToMillis(b.data().updatedAt || b.data().createdAt);
       return bTime - aTime;
-    })[0] || null;
+    });
+}
+
+async function getStudentVisibleExamDocument(examId) {
+  const documents = await getStudentExamDocuments();
+  return documents.find(doc => doc.id === String(examId || '')) || null;
+}
+
+async function loadStudentExamCatalog() {
+  if (!state.user || isAdmin()) return;
+  state.studentExamsStatus = 'loading';
+  try {
+    const documents = await getStudentExamDocuments();
+    const attempts = await Promise.all(documents.map(doc =>
+      db.collection('examAttempts').doc(getExamAttemptId(doc.id, state.user.uid)).get()
+    ));
+    state.studentExams = documents.map((doc, index) => ({
+      ...serializeExamDocument(doc),
+      attemptStatus: attempts[index].exists ? attempts[index].data().status : '',
+      hasAttempt: attempts[index].exists
+    }));
+    state.studentExamsStatus = 'ready';
+    state.studentExamsMessage = '';
+  } catch (error) {
+    console.error('Erro ao carregar provas da turma:', error);
+    state.studentExams = [];
+    state.studentExamsStatus = 'error';
+    state.studentExamsMessage = getFriendlyError(error, 'Não foi possível carregar as provas da turma.');
+  }
 }
 
 function getExamAttemptId(examId, uid) {
@@ -654,8 +692,8 @@ async function deleteExamOnFreeTier(data) {
   return { ok: true };
 }
 
-async function getExamStateOnFreeTier() {
-  const examDoc = await getStudentVisibleExamDocument();
+async function getExamStateOnFreeTier(data = {}) {
+  const examDoc = await getStudentVisibleExamDocument(data.examId);
   if (!examDoc) return { exam: null, attempt: null };
   const exam = serializeExamDocument(examDoc);
   const attemptRef = db.collection('examAttempts').doc(getExamAttemptId(exam.id, state.user.uid));
@@ -969,6 +1007,10 @@ const state = {
   leaderboard: [],
   userStats: createDefaultStats(),
   exam: null,
+  selectedExamId: null,
+  studentExams: [],
+  studentExamsStatus: 'idle',
+  studentExamsMessage: '',
   examAttempt: null,
   examAnswers: [],
   examAttachments: {},
@@ -981,6 +1023,7 @@ const state = {
   academicSubjects: [],
   academicStatus: 'idle',
   academicMessage: '',
+  academicSubjectClassId: 'entra21',
   studyReferences: [],
   referencesStatus: 'idle',
   referencesMessage: '',
@@ -1028,6 +1071,10 @@ auth.onAuthStateChanged(async (user) => {
       await loadLeaderboardFromFirestore();
       await loadAcademicCatalog();
       state.currentView = getAuthorizedViewFromHash();
+      if (state.currentView === 'exam' && !isAdmin()) {
+        state.examScreen = 'catalog';
+        state.studentExamsStatus = 'idle';
+      }
       if (!window.location.hash) {
         window.history.replaceState(null, '', '#/');
       }
@@ -1040,6 +1087,15 @@ auth.onAuthStateChanged(async (user) => {
       state.academicStatus = 'idle';
       state.studyReferences = [];
       state.referencesStatus = 'idle';
+      state.studentExams = [];
+      state.studentExamsStatus = 'idle';
+      state.selectedExamId = null;
+      state.exam = null;
+      state.examAttempt = null;
+      state.examAnswers = [];
+      state.examAttachments = {};
+      state.examAttachmentUploads = {};
+      state.examScreen = 'idle';
     }
   } catch (error) {
     console.error("Erro crítico no observer de auth:", error);
@@ -1451,7 +1507,9 @@ function getAuthorizedViewFromHash() {
 window.navigateTo = view => {
   const route = viewRoutes[view] || viewRoutes.hub;
   if (view === 'exam') {
-    state.examScreen = 'idle';
+    state.examScreen = 'catalog';
+    state.selectedExamId = null;
+    state.studentExamsStatus = 'idle';
     state.pendingIdentity = null;
     state.examAttachments = {};
     state.examAttachmentUploads = {};
@@ -1614,7 +1672,16 @@ function renderHubModuleCard(module) {
 
 function renderHubHome() {
   state.currentView = 'hub';
+  if (!isAdmin() && state.studentExamsStatus === 'idle' && isStudentProfileComplete(state.userStats.studentProfile)) {
+    state.studentExamsStatus = 'loading';
+    queueMicrotask(async () => {
+      await loadStudentExamCatalog();
+      if (state.currentView === 'hub') renderHubHome();
+    });
+  }
   const mainContent = document.getElementById('main-content');
+  const blockedExamCount = state.studentExams.filter(exam => !exam.active).length;
+  const activeExamCount = state.studentExams.filter(exam => exam.active).length;
   const modules = [
     ...(isAdmin() ? [
       {
@@ -1671,12 +1738,12 @@ function renderHubHome() {
       },
       {
         view: 'exam',
-        icon: state.examScreen === 'locked' ? '🔒' : '✓',
-        kicker: 'Avaliação',
-        title: 'Prova',
-        description: state.examScreen === 'locked'
-          ? 'A avaliação está cadastrada e aguarda liberação do professor.'
-          : 'Acesse a avaliação disponibilizada pelo professor.'
+        icon: activeExamCount > 0 ? '✓' : (blockedExamCount > 0 ? '🔒' : '📝'),
+        kicker: 'Avaliações da turma',
+        title: 'Provas',
+        description: state.studentExamsStatus === 'loading'
+          ? 'Carregando as provas da sua turma...'
+          : `${activeExamCount} disponível(is) · ${blockedExamCount} bloqueada(s).`
       }
     ])
   ];
@@ -1717,7 +1784,9 @@ function renderAcademicEntityList(items, kind) {
   if (!items.length) return '<div class="academic-empty">Nenhum cadastro disponível.</div>';
   return `<div class="academic-entity-list">${items.map(item => `
     <div class="academic-entity-row">
-      <span><strong>${escapeHtml(item.name)}</strong>${item.builtin ? '<small>Turma padrão</small>' : ''}</span>
+      <span><strong>${escapeHtml(item.name)}</strong>${kind === 'subject'
+        ? `<small>${escapeHtml(item.className || 'Sem turma vinculada')}</small>`
+        : (item.builtin ? '<small>Turma padrão</small>' : '')}</span>
       ${item.builtin ? '' : `<button type="button" class="archive-academic-btn" onclick="window.archiveAcademicEntity('${kind}', '${item.id}')">Arquivar</button>`}
     </div>
   `).join('')}</div>`;
@@ -1743,7 +1812,8 @@ function renderTeacherAcademics() {
         </article>
         <article class="academic-panel">
           <div><span class="academic-panel-kicker">Conteúdo</span><h3>Matérias</h3><p>As matérias serão relacionadas às provas e referências de estudo.</p></div>
-          <form class="academic-inline-form" onsubmit="window.submitAcademicEntity(event, 'subject')">
+          <form class="academic-inline-form subject-registration-form" onsubmit="window.submitAcademicEntity(event, 'subject')">
+            <label class="exam-field"><span>Turma da matéria</span><select name="classId" required onchange="window.updateAcademicSubjectClass(this.value)">${renderAcademicOptions(state.academicClasses, state.academicSubjectClassId, 'Selecione a turma')}</select></label>
             <label class="exam-field"><span>Nome da matéria</span><input name="name" minlength="2" maxlength="80" required placeholder="Ex.: Desenvolvimento Web" /></label>
             <button class="next-btn" type="submit">Cadastrar matéria</button>
           </form>
@@ -1781,20 +1851,21 @@ function renderTeacherReferences() {
       if (state.currentView === 'teacher-references') renderTeacherReferences();
     });
   }
-  const canPublish = state.academicSubjects.length > 0;
+  const referenceSubjects = getSubjectsForClass(state.academicSubjects, state.teacherReferenceClassId);
+  const canPublish = referenceSubjects.length > 0;
   mainContent.innerHTML = `
     <section class="exam-page references-management-page">
       <div class="exam-page-heading">
         <div><span class="eyebrow">Materiais de estudo</span><h2>Gerenciar referências</h2><p>Publique links de apoio direcionados por turma e matéria.</p></div>
         <button class="secondary-btn" onclick="window.navigateTo('hub')">Voltar ao Hub</button>
       </div>
-      ${!canPublish ? '<div class="exam-alert error">Cadastre pelo menos uma matéria antes de publicar referências.</div>' : ''}
+      ${!canPublish ? '<div class="exam-alert error">Cadastre uma matéria para a turma selecionada antes de publicar referências.</div>' : ''}
       ${state.referencesMessage ? `<div class="exam-alert ${state.referencesMessage.startsWith('Erro:') ? 'error' : 'success'}">${escapeHtml(state.referencesMessage)}</div>` : ''}
       <form class="exam-builder reference-builder" onsubmit="window.submitStudyReference(event)">
         <label class="exam-field"><span>Título</span><input name="title" minlength="3" maxlength="160" required value="${escapeHtml(state.teacherReferenceTitle)}" oninput="window.updateReferenceDraft('title', this.value)" placeholder="Ex.: Guia de JavaScript" /></label>
         <label class="exam-field"><span>Link</span><input name="url" type="url" maxlength="2048" required value="${escapeHtml(state.teacherReferenceUrl)}" oninput="window.updateReferenceDraft('url', this.value)" placeholder="https://..." /></label>
         <label class="exam-field"><span>Turma</span><select name="classId" required onchange="window.updateReferenceDraft('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.teacherReferenceClassId, 'Selecione a turma')}</select></label>
-        <label class="exam-field"><span>Matéria</span><select name="subjectId" required onchange="window.updateReferenceDraft('subjectId', this.value)">${renderAcademicOptions(state.academicSubjects, state.teacherReferenceSubjectId, 'Selecione a matéria')}</select></label>
+        <label class="exam-field"><span>Matéria</span><select name="subjectId" required onchange="window.updateReferenceDraft('subjectId', this.value)">${renderAcademicOptions(referenceSubjects, state.teacherReferenceSubjectId, 'Selecione a matéria')}</select></label>
         <label class="exam-field reference-description-field"><span>Descrição</span><textarea name="description" maxlength="1000" rows="4" oninput="window.updateReferenceDraft('description', this.value)" placeholder="Orientações para o estudo">${escapeHtml(state.teacherReferenceDescription)}</textarea></label>
         <button class="next-btn reference-submit" type="submit" ${canPublish ? '' : 'disabled'}>Publicar referência</button>
       </form>
@@ -2172,6 +2243,8 @@ function renderAlternativeBuilder(item, questionIndex, mode) {
 
 function renderTeacherExamCreator() {
   const mainContent = document.getElementById('main-content');
+  const examSubjects = getSubjectsForClass(state.academicSubjects, state.teacherExamClassId);
+  const canCreateExam = examSubjects.length > 0;
   mainContent.innerHTML = `
     <section class="exam-page teacher-exam-page">
       <div class="exam-page-heading">
@@ -2190,9 +2263,9 @@ function renderTeacherExamCreator() {
         </label>
         <div class="exam-audience-fields">
           <label class="exam-field"><span>Turma</span><select required onchange="window.updateTeacherExamAudience('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.teacherExamClassId, 'Selecione a turma')}</select></label>
-          <label class="exam-field"><span>Matéria</span><select required onchange="window.updateTeacherExamAudience('subjectId', this.value)">${renderAcademicOptions(state.academicSubjects, state.teacherExamSubjectId, 'Selecione a matéria')}</select></label>
+          <label class="exam-field"><span>Matéria</span><select required onchange="window.updateTeacherExamAudience('subjectId', this.value)">${renderAcademicOptions(examSubjects, state.teacherExamSubjectId, 'Selecione a matéria')}</select></label>
         </div>
-        ${state.academicSubjects.length ? '' : '<div class="exam-alert error">Cadastre uma matéria em Turmas e matérias antes de criar a prova.</div>'}
+        ${canCreateExam ? '' : '<div class="exam-alert error">Cadastre uma matéria para a turma selecionada antes de criar a prova.</div>'}
 
         <div class="builder-heading">
           <h3>Perguntas da prova</h3>
@@ -2224,7 +2297,7 @@ function renderTeacherExamCreator() {
 
         ${state.teacherMessage ? `<div class="exam-alert ${state.teacherMessage.startsWith('Prova criada') ? 'success' : 'error'}" role="status">${escapeHtml(state.teacherMessage)}</div>` : ''}
 
-        <button type="submit" class="next-btn confirm-exam-btn" ${state.academicSubjects.length ? '' : 'disabled'}>Confirmar Criação</button>
+        <button type="submit" class="next-btn confirm-exam-btn" ${canCreateExam ? '' : 'disabled'}>Confirmar Criação</button>
       </form>
     </section>
   `;
@@ -2281,6 +2354,8 @@ function renderTeacherExamManager() {
 }
 
 function renderTeacherExamEditor(mainContent) {
+  const editingSubjects = getSubjectsForClass(state.academicSubjects, state.editingExamClassId);
+  const canSaveExam = editingSubjects.length > 0;
   mainContent.innerHTML = `
     <section class="exam-page teacher-exam-editor">
       <div class="exam-page-heading">
@@ -2291,9 +2366,9 @@ function renderTeacherExamEditor(mainContent) {
         <label class="exam-field"><span>Título da prova</span><input type="text" maxlength="120" required value="${escapeHtml(state.editingExamTitle)}" oninput="window.updateEditingExamTitle(this.value)" /></label>
         <div class="exam-audience-fields">
           <label class="exam-field"><span>Turma</span><select required onchange="window.updateEditingExamAudience('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.editingExamClassId, 'Selecione a turma')}</select></label>
-          <label class="exam-field"><span>Matéria</span><select required onchange="window.updateEditingExamAudience('subjectId', this.value)">${renderAcademicOptions(state.academicSubjects, state.editingExamSubjectId, 'Selecione a matéria')}</select></label>
+          <label class="exam-field"><span>Matéria</span><select required onchange="window.updateEditingExamAudience('subjectId', this.value)">${renderAcademicOptions(editingSubjects, state.editingExamSubjectId, 'Selecione a matéria')}</select></label>
         </div>
-        ${state.academicSubjects.length ? '' : '<div class="exam-alert error">Cadastre uma matéria em Turmas e matérias antes de salvar a prova.</div>'}
+        ${canSaveExam ? '' : '<div class="exam-alert error">Cadastre uma matéria para a turma selecionada antes de salvar a prova.</div>'}
         <div class="builder-heading"><h3>Perguntas da prova</h3><span>${state.editingExamQuestions.length} ${state.editingExamQuestions.length === 1 ? 'questão' : 'questões'}</span></div>
         <div class="question-builder-list">
           ${state.editingExamQuestions.map((item, index) => `
@@ -2310,7 +2385,7 @@ function renderTeacherExamEditor(mainContent) {
         </div>
         <button type="button" class="add-question-btn" onclick="window.addEditingExamQuestion()"><span aria-hidden="true">+</span> Adicionar pergunta</button>
         ${state.teacherExamsMessage ? `<div class="exam-alert ${state.teacherExamsMessage.startsWith('Erro:') ? 'error' : 'success'}">${escapeHtml(state.teacherExamsMessage)}</div>` : ''}
-        <button type="submit" class="next-btn confirm-exam-btn" ${state.academicSubjects.length ? '' : 'disabled'}>Salvar alterações</button>
+        <button type="submit" class="next-btn confirm-exam-btn" ${canSaveExam ? '' : 'disabled'}>Salvar alterações</button>
       </form>
     </section>
   `;
@@ -2406,8 +2481,70 @@ async function loadTeacherResults() {
   if (state.currentView === 'teacher-results') renderTeacherResults();
 }
 
+function renderStudentExamCatalog(mainContent) {
+  const profile = state.userStats.studentProfile || {};
+  if (!isStudentProfileComplete(profile)) {
+    mainContent.innerHTML = '<section class="exam-page"><div class="exam-empty"><div class="empty-icon">◉</div><h2>Complete seu cadastro</h2><p>Informe sua turma para visualizar somente as provas destinadas a você.</p><button class="next-btn" onclick="window.navigateTo(\'student-registration\')">Abrir cadastro</button></div></section>';
+    return;
+  }
+  const blockedCount = state.studentExams.filter(exam => !exam.active).length;
+  const activeCount = state.studentExams.filter(exam => exam.active).length;
+  const content = state.studentExamsStatus === 'loading'
+    ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando provas da turma...</p></div>'
+    : state.studentExamsStatus === 'error'
+      ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.studentExamsMessage)}</p><button class="next-btn" onclick="window.refreshStudentExamCatalog()">Tentar novamente</button></div>`
+      : state.studentExams.length
+        ? `<div class="student-exam-catalog-grid">${state.studentExams.map(exam => {
+            const canOpen = exam.active || exam.hasAttempt;
+            const status = exam.attemptStatus === 'submitted'
+              ? 'Concluída'
+              : exam.attemptStatus === 'in_progress'
+                ? 'Em andamento'
+                : exam.active ? 'Disponível' : 'Bloqueada';
+            const action = exam.attemptStatus === 'submitted'
+              ? 'Ver resultado'
+              : exam.attemptStatus === 'in_progress'
+                ? 'Continuar prova'
+                : 'Iniciar prova';
+            return `
+              <article class="student-exam-catalog-card ${exam.active ? 'active' : 'locked'}">
+                <div class="registered-exam-topline"><span class="exam-status-badge ${exam.active ? 'active' : 'inactive'}">${exam.active ? '✓' : '🔒'} ${status}</span><span class="registered-exam-date">${formatExamDate(exam.updatedAtMillis || exam.createdAtMillis)}</span></div>
+                <h3>${escapeHtml(exam.title)}</h3>
+                <p>${exam.questionCount} ${exam.questionCount === 1 ? 'questão' : 'questões'} · ${escapeHtml(exam.subjectName || 'Matéria')}</p>
+                <div class="exam-academic-meta"><span>${escapeHtml(exam.className || profile.className)}</span><span>${escapeHtml(exam.subjectName || 'Matéria não informada')}</span></div>
+                ${canOpen
+                  ? `<button class="next-btn" onclick="window.openStudentExam('${exam.id}')">${action}</button>`
+                  : '<div class="catalog-locked-notice">Aguarde o professor liberar esta prova.</div>'}
+              </article>
+            `;
+          }).join('')}</div>`
+        : '<div class="exam-empty"><div class="empty-icon">📝</div><h3>Nenhuma prova para sua turma</h3><p>O professor ainda não cadastrou avaliações para esta turma.</p></div>';
+
+  mainContent.innerHTML = `
+    <section class="exam-page student-exam-catalog-page">
+      <div class="exam-page-heading results-heading">
+        <div><span class="eyebrow">Turma ${escapeHtml(profile.className)}</span><h2>Provas da sua turma</h2><p>Você visualiza somente avaliações destinadas à sua turma.</p></div>
+        <button class="secondary-btn" onclick="window.refreshStudentExamCatalog()">Atualizar</button>
+      </div>
+      <div class="exam-catalog-summary"><span><strong>${activeCount}</strong> disponíveis</span><span class="blocked"><strong>${blockedCount}</strong> bloqueadas</span><span><strong>${state.studentExams.length}</strong> total</span></div>
+      ${content}
+    </section>
+  `;
+}
+
 function renderExamPortal() {
   const mainContent = document.getElementById('main-content');
+  if (state.examScreen === 'catalog') {
+    if (state.studentExamsStatus === 'idle') {
+      state.studentExamsStatus = 'loading';
+      queueMicrotask(async () => {
+        await loadStudentExamCatalog();
+        if (state.currentView === 'exam' && state.examScreen === 'catalog') renderExamPortal();
+      });
+    }
+    renderStudentExamCatalog(mainContent);
+    return;
+  }
   if (state.examScreen === 'idle') {
     state.examScreen = 'loading';
     queueMicrotask(loadExamPortal);
@@ -2605,6 +2742,7 @@ function renderExamResult(mainContent) {
           ? `${automaticSummary} ${result.manualReviewCount} resposta(s) com anexo aguardam revisão manual.`
           : `Você acertou <strong>${result.correctCount}</strong> de <strong>${result.totalQuestions}</strong> questões.`}</p>
         <div class="result-meta"><span>Tempo total: <strong>${formatExamTime(result.elapsedSeconds)}</strong></span><span>Aluno: <strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong></span></div>
+        <button class="secondary-btn result-back-btn" onclick="window.backToStudentExamCatalog()">Voltar às provas</button>
       </div>
       <div class="feedback-list">
         <h3>Feedback da avaliação</h3>
@@ -2637,7 +2775,7 @@ function renderExamResult(mainContent) {
 
 async function loadExamPortal() {
   try {
-    const data = await callExamApi('getExamState');
+    const data = await callExamApi('getExamState', { examId: state.selectedExamId });
     state.exam = data.exam;
     state.examAttempt = data.attempt;
     state.examMessage = '';
@@ -2882,7 +3020,14 @@ window.updateTeacherExamTitle = value => {
 };
 
 window.updateTeacherExamAudience = (field, value) => {
-  if (field === 'classId') state.teacherExamClassId = value;
+  if (field === 'classId') {
+    state.teacherExamClassId = value;
+    const available = getSubjectsForClass(state.academicSubjects, value);
+    if (!available.some(subject => subject.id === state.teacherExamSubjectId)) {
+      state.teacherExamSubjectId = '';
+    }
+    renderTeacherExamCreator();
+  }
   if (field === 'subjectId') state.teacherExamSubjectId = value;
 };
 
@@ -3030,7 +3175,14 @@ window.updateEditingExamTitle = value => {
 };
 
 window.updateEditingExamAudience = (field, value) => {
-  if (field === 'classId') state.editingExamClassId = value;
+  if (field === 'classId') {
+    state.editingExamClassId = value;
+    const available = getSubjectsForClass(state.academicSubjects, value);
+    if (!available.some(subject => subject.id === state.editingExamSubjectId)) {
+      state.editingExamSubjectId = '';
+    }
+    renderTeacherExamManager();
+  }
   if (field === 'subjectId') state.editingExamSubjectId = value;
 };
 
@@ -3222,18 +3374,32 @@ window.updateReferenceDraft = (field, value) => {
     classId: 'teacherReferenceClassId',
     subjectId: 'teacherReferenceSubjectId'
   };
-  if (fields[field]) state[fields[field]] = value;
+  if (!fields[field]) return;
+  state[fields[field]] = value;
+  if (field === 'classId') {
+    const available = getSubjectsForClass(state.academicSubjects, value);
+    if (!available.some(subject => subject.id === state.teacherReferenceSubjectId)) {
+      state.teacherReferenceSubjectId = '';
+    }
+    renderTeacherReferences();
+  }
+};
+
+window.updateAcademicSubjectClass = value => {
+  state.academicSubjectClassId = value;
 };
 
 window.submitAcademicEntity = async (event, kind) => {
   event.preventDefault();
   const form = event.currentTarget;
   const button = form.querySelector('button[type="submit"]');
-  const name = new FormData(form).get('name');
+  const formData = new FormData(form);
+  const name = formData.get('name');
+  const classId = kind === 'subject' ? String(formData.get('classId') || '') : '';
   if (button) button.disabled = true;
   state.academicMessage = '';
   try {
-    const result = await createAcademicEntityOnFreeTier(kind, name);
+    const result = await createAcademicEntityOnFreeTier(kind, name, classId);
     state.academicMessage = `${kind === 'class' ? 'Turma' : 'Matéria'} "${result.name}" cadastrada com sucesso.`;
     form.reset();
   } catch (error) {
@@ -3266,7 +3432,11 @@ window.submitStudyReference = async event => {
     classId: formData.get('classId'),
     subjectId: formData.get('subjectId')
   };
-  Object.entries(data).forEach(([field, value]) => window.updateReferenceDraft(field, String(value || '')));
+  state.teacherReferenceTitle = String(data.title || '');
+  state.teacherReferenceDescription = String(data.description || '');
+  state.teacherReferenceUrl = String(data.url || '');
+  state.teacherReferenceClassId = String(data.classId || '');
+  state.teacherReferenceSubjectId = String(data.subjectId || '');
   if (button) button.disabled = true;
   state.referencesMessage = '';
   try {
@@ -3320,8 +3490,44 @@ window.submitStudentRegistration = async event => {
   state.studentProfileMessage = result.ok
     ? 'Cadastro salvo com sucesso. Seu perfil global já está disponível nos submódulos.'
     : result.message;
+  if (result.ok) {
+    state.studentExams = [];
+    state.studentExamsStatus = 'idle';
+    state.studyReferences = [];
+    state.referencesStatus = 'idle';
+    await loadAcademicCatalog();
+  }
   updateHeader();
   renderStudentRegistration();
+};
+
+window.openStudentExam = examId => {
+  const exam = state.studentExams.find(item => item.id === examId);
+  if (!exam || (!exam.active && !exam.hasAttempt)) return;
+  state.selectedExamId = examId;
+  state.exam = null;
+  state.examAttempt = null;
+  state.examScreen = 'idle';
+  state.examMessage = '';
+  renderExamPortal();
+};
+
+window.refreshStudentExamCatalog = () => {
+  state.examScreen = 'catalog';
+  state.selectedExamId = null;
+  state.studentExamsStatus = 'idle';
+  state.studentExamsMessage = '';
+  renderExamPortal();
+};
+
+window.backToStudentExamCatalog = () => {
+  stopTimer();
+  state.examScreen = 'catalog';
+  state.selectedExamId = null;
+  state.studentExamsStatus = 'idle';
+  state.exam = null;
+  state.examAttempt = null;
+  renderExamPortal();
 };
 
 window.reloadExamPortal = () => {
