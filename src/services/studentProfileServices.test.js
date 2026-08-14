@@ -16,7 +16,7 @@ const validProfile = {
 };
 
 describe('student profile validation', () => {
-  it('normalizes and accepts a complete student profile', () => {
+  it('normalizes a complete profile and migrates its class ID', () => {
     const profile = validateStudentProfile(validProfile);
 
     assert.equal(profile.fullName, 'Ana Maria Silva');
@@ -24,12 +24,23 @@ describe('student profile validation', () => {
     assert.equal(profile.nicknameKey, 'ana_dev');
     assert.equal(profile.email, 'ana@example.com');
     assert.equal(profile.className, STUDENT_CLASSES[0]);
+    assert.equal(profile.classId, 'entra21');
     assert.equal(isStudentProfileComplete(profile), true);
   });
 
-  it('rejects incomplete names, invalid classes, short goals and invalid emails', () => {
+  it('preserves a dynamic class ID', () => {
+    const profile = validateStudentProfile({
+      ...validProfile,
+      classId: 'custom-class',
+      className: 'Turma Noturna'
+    });
+    assert.equal(profile.classId, 'custom-class');
+    assert.equal(profile.className, 'Turma Noturna');
+  });
+
+  it('rejects incomplete names, missing classes, short goals and invalid emails', () => {
     assert.throws(() => validateStudentProfile({ ...validProfile, fullName: 'Ana' }), /nome e o sobrenome/);
-    assert.throws(() => validateStudentProfile({ ...validProfile, className: 'Outra' }), /turma válida/);
+    assert.throws(() => validateStudentProfile({ ...validProfile, className: '' }), /Turma deve ter/);
     assert.throws(() => validateStudentProfile({ ...validProfile, courseGoal: 'Aprender' }), /entre 10 e 1000/);
     assert.throws(() => validateStudentProfile({ ...validProfile, email: 'invalid' }), /e-mail válido/);
     assert.equal(isStudentProfileComplete({}), false);

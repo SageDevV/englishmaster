@@ -1,6 +1,11 @@
 import { validateNickname } from './gameServices.js';
+import {
+  DEFAULT_ACADEMIC_CLASSES,
+  getProfileClassId,
+  validateAcademicEntityName
+} from './academicServices.js';
 
-export const STUDENT_CLASSES = ['Entra21', 'JovemProgramador'];
+export const STUDENT_CLASSES = DEFAULT_ACADEMIC_CLASSES.map(item => item.name);
 
 function normalizeText(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ');
@@ -25,10 +30,9 @@ export function validateStudentProfile(data = {}) {
     throw new Error(nicknameValidation.message);
   }
 
-  const className = normalizeText(data.className);
-  if (!STUDENT_CLASSES.includes(className)) {
-    throw new Error('Selecione uma turma válida.');
-  }
+  const className = validateAcademicEntityName(data.className, 'Turma').name;
+  const classId = getProfileClassId({ classId: data.classId, className });
+  if (!classId || classId.length > 120) throw new Error('Selecione uma turma válida.');
 
   const courseGoal = validateLength(data.courseGoal, 'Objetivo com o curso', 10, 1000);
   const email = normalizeText(data.email).toLowerCase();
@@ -40,6 +44,7 @@ export function validateStudentProfile(data = {}) {
     fullName,
     nickname: nicknameValidation.nickname,
     nicknameKey: nicknameValidation.nicknameKey,
+    classId,
     className,
     courseGoal,
     email

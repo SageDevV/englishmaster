@@ -37,9 +37,17 @@ import {
   validateZipFileDescriptor
 } from './src/services/examServices.js';
 import {
+  DEFAULT_ACADEMIC_CLASSES,
+  getProfileClassId,
+  mergeAcademicClasses,
+  normalizeAcademicKey,
+  validateAcademicEntityName,
+  validateAcademicSelection,
+  validateStudyReference
+} from './src/services/academicServices.js';
+import {
   isStudentProfileComplete,
   splitStudentFullName,
-  STUDENT_CLASSES,
   validateStudentProfile
 } from './src/services/studentProfileServices.js';
 
@@ -99,11 +107,183 @@ function timestampToMillis(value) {
   return value?.toMillis ? value.toMillis() : Number(value || 0);
 }
 
+function serializeAcademicDocument(doc) {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    name: data.name,
+    nameKey: data.nameKey || normalizeAcademicKey(data.name),
+    active: data.active !== false,
+    deleted: data.deleted === true,
+    builtin: false,
+    createdAtMillis: timestampToMillis(data.createdAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt)
+  };
+}
+
+function serializeStudyReference(doc) {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    title: data.title,
+    description: data.description || '',
+    url: data.url,
+    classId: data.classId,
+    className: data.className,
+    subjectId: data.subjectId,
+    subjectName: data.subjectName,
+    active: data.active !== false,
+    deleted: data.deleted === true,
+    createdAtMillis: timestampToMillis(data.createdAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt)
+  };
+}
+
+async function loadAcademicCatalog() {
+  if (!state.user) return;
+  state.academicStatus = 'loading';
+  try {
+    const [classesSnapshot, subjectsSnapshot] = await Promise.all([
+      db.collection('academicClasses').get(),
+      db.collection('academicSubjects').get()
+    ]);
+    state.academicClasses = mergeAcademicClasses(classesSnapshot.docs.map(serializeAcademicDocument));
+    state.academicSubjects = subjectsSnapshot.docs
+      .map(serializeAcademicDocument)
+      .filter(item => item.active && !item.deleted)
+      .sort((a, b) => a.name.localeCompare(b.name, 'pt-BR'));
+    state.academicStatus = 'ready';
+    state.academicMessage = '';
+  } catch (error) {
+    console.error('Erro ao carregar catálogo acadêmico:', error);
+    state.academicClasses = mergeAcademicClasses();
+    state.academicSubjects = [];
+    state.academicStatus = 'error';
+    state.academicMessage = 'Não foi possível carregar turmas e matérias.';
+  }
+}
+
+function getAcademicCollection(kind) {
+  if (kind === 'class') return { collection: 'academicClasses', label: 'Turma' };
+  if (kind === 'subject') return { collection: 'academicSubjects', label: 'Matéria' };
+  throw new Error('Tipo de cadastro acadêmico inválido.');
+}
+
+async function createAcademicEntityOnFreeTier(kind, rawName) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const { collection, label } = getAcademicCollection(kind);
+  const entity = validateAcademicEntityName(rawName, label);
+  const currentItems = kind === 'class' ? state.academicClasses : state.academicSubjects;
+  if (currentItems.some(item => item.nameKey === entity.nameKey)) {
+    throw new Error(`${label} já cadastrada.`);
+  }
+  const existing = await db.collection(collection).where('nameKey', '==', entity.nameKey).limit(1).get();
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  if (!existing.empty) {
+    await existing.docs[0].ref.update({
+      name: entity.name,
+      active: true,
+      deleted: false,
+      deletedAt: firebase.firestore.FieldValue.delete(),
+      updatedAt: serverTimestamp
+    });
+  } else {
+    await db.collection(collection).add({
+      ...entity,
+      active: true,
+      deleted: false,
+      createdBy: state.user.uid,
+      createdByEmail: state.user.email || '',
+      createdAt: serverTimestamp,
+      updatedAt: serverTimestamp
+    });
+  }
+  await loadAcademicCatalog();
+  return { ok: true, name: entity.name };
+}
+
+async function archiveAcademicEntityOnFreeTier(kind, id) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const { collection } = getAcademicCollection(kind);
+  const item = (kind === 'class' ? state.academicClasses : state.academicSubjects)
+    .find(candidate => candidate.id === id);
+  if (!item || item.builtin) throw new Error('Este item não pode ser arquivado.');
+  await db.collection(collection).doc(id).update({
+    active: false,
+    deleted: true,
+    deletedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  await loadAcademicCatalog();
+  return { ok: true };
+}
+
+async function createStudyReferenceOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const reference = validateStudyReference(data, state.academicClasses, state.academicSubjects);
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  const docRef = await db.collection('studyReferences').add({
+    ...reference,
+    active: true,
+    deleted: false,
+    createdBy: state.user.uid,
+    createdByEmail: state.user.email || '',
+    createdAt: serverTimestamp,
+    updatedAt: serverTimestamp
+  });
+  return { ok: true, id: docRef.id };
+}
+
+async function archiveStudyReferenceOnFreeTier(referenceId) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  await db.collection('studyReferences').doc(String(referenceId || '')).update({
+    active: false,
+    deleted: true,
+    deletedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true };
+}
+
+async function loadStudyReferences() {
+  if (!state.user) return;
+  state.referencesStatus = 'loading';
+  try {
+    let query = db.collection('studyReferences');
+    if (!isAdmin()) {
+      const classId = getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses);
+      if (!classId) {
+        state.studyReferences = [];
+        state.referencesStatus = 'ready';
+        return;
+      }
+      query = query
+        .where('classId', '==', classId)
+        .where('active', '==', true)
+        .where('deleted', '==', false);
+    }
+    const snapshot = await query.get();
+    state.studyReferences = snapshot.docs
+      .map(serializeStudyReference)
+      .filter(item => item.active && !item.deleted)
+      .sort((a, b) => (b.updatedAtMillis || b.createdAtMillis) - (a.updatedAtMillis || a.createdAtMillis));
+    state.referencesStatus = 'ready';
+  } catch (error) {
+    console.error('Erro ao carregar referências:', error);
+    state.referencesStatus = 'error';
+    state.referencesMessage = getFriendlyError(error, 'Não foi possível carregar as referências.');
+  }
+}
+
 function serializeExamDocument(doc) {
   const data = doc.data();
   return {
     id: doc.id,
     title: data.title,
+    classId: data.classId || '',
+    className: data.className || '',
+    subjectId: data.subjectId || '',
+    subjectName: data.subjectName || '',
     durationSeconds: data.durationSeconds,
     questionCount: data.questionCount,
     questions: data.questions || [],
@@ -150,18 +330,27 @@ async function serializeAttemptData(data, fallbackExam) {
   return result;
 }
 
-async function getActiveExamDocument() {
+async function getActiveExamDocument(classId) {
   const snapshot = await db.collection('exams').where('active', '==', true).get();
-  if (snapshot.empty) return null;
-  return snapshot.docs.sort((a, b) => timestampToMillis(b.data().createdAt) - timestampToMillis(a.data().createdAt))[0];
+  const exactMatches = snapshot.docs.filter(doc => doc.data().classId === classId);
+  const matching = exactMatches.length
+    ? exactMatches
+    : snapshot.docs.filter(doc => !doc.data().classId);
+  if (!matching.length) return null;
+  return matching.sort((a, b) => timestampToMillis(b.data().createdAt) - timestampToMillis(a.data().createdAt))[0];
 }
 
 async function getStudentVisibleExamDocument() {
-  const activeExam = await getActiveExamDocument();
+  const classId = getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses);
+  const activeExam = await getActiveExamDocument(classId);
   if (activeExam) return activeExam;
   const snapshot = await db.collection('exams').get();
-  return snapshot.docs
-    .filter(doc => doc.data().deleted !== true)
+  const available = snapshot.docs.filter(doc => doc.data().deleted !== true);
+  const exactMatches = available.filter(doc => doc.data().classId === classId);
+  const matching = exactMatches.length
+    ? exactMatches
+    : available.filter(doc => !doc.data().classId);
+  return matching
     .sort((a, b) => {
       const aTime = timestampToMillis(a.data().updatedAt || a.data().createdAt);
       const bTime = timestampToMillis(b.data().updatedAt || b.data().createdAt);
@@ -255,6 +444,7 @@ async function createExamOnFreeTier(data) {
   if (!isAdmin()) throw new Error('Área exclusiva do professor.');
   const title = String(data.title || 'Prova de Inglês').trim().slice(0, 120);
   if (!title) throw new Error('Informe o título da prova.');
+  const audience = validateAcademicSelection(data, state.academicClasses, state.academicSubjects);
   if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Adicione pelo menos uma pergunta à prova.');
 
   const gradingSalt = createExamSalt();
@@ -266,17 +456,21 @@ async function createExamOnFreeTier(data) {
     db.collection('exams').where('active', '==', true).get(),
     getExamsWithRunningAttempts()
   ]);
-  if (activeSnapshot.docs.some(doc => examsWithRunningAttempts.has(doc.id))) {
-    throw new Error('Existe uma tentativa em andamento na prova atual. Aguarde o término antes de publicar outra prova.');
+  const activeForClass = activeSnapshot.docs.filter(doc =>
+    doc.data().classId === audience.classId
+  );
+  if (activeForClass.some(doc => examsWithRunningAttempts.has(doc.id))) {
+    throw new Error('Existe uma tentativa em andamento na prova atual desta turma. Aguarde o término antes de publicar outra prova.');
   }
   const examRef = db.collection('exams').doc();
   const batch = db.batch();
-  activeSnapshot.docs.forEach(doc => batch.update(doc.ref, {
+  activeForClass.forEach(doc => batch.update(doc.ref, {
     active: false,
     archivedAt: firebase.firestore.FieldValue.serverTimestamp()
   }));
   batch.set(examRef, {
     title,
+    ...audience,
     active: true,
     deleted: false,
     durationSeconds: EXAM_DURATION_SECONDS,
@@ -329,6 +523,7 @@ async function updateExamOnFreeTier(data) {
   const existing = serializeExamDocument(examDoc);
   const title = String(data.title || '').trim().slice(0, 120);
   if (!title) throw new Error('Informe o título da prova.');
+  const audience = validateAcademicSelection(data, state.academicClasses, state.academicSubjects);
   if (!Array.isArray(data.questions) || !data.questions.length) throw new Error('Mantenha pelo menos uma pergunta na prova.');
   const existingById = new Map(existing.questions.map(question => [question.id, question]));
   const questions = await Promise.all(data.questions.map((item, index) => {
@@ -347,6 +542,7 @@ async function updateExamOnFreeTier(data) {
     const batch = db.batch();
     batch.set(replacementRef, {
       title,
+      ...audience,
       active: existing.active,
       deleted: false,
       durationSeconds: existing.durationSeconds || EXAM_DURATION_SECONDS,
@@ -372,6 +568,7 @@ async function updateExamOnFreeTier(data) {
 
   await examRef.update({
     title,
+    ...audience,
     questions,
     questionCount: questions.length,
     updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -389,13 +586,18 @@ async function publishExamOnFreeTier(data) {
     getExamsWithRunningAttempts()
   ]);
   if (!targetDoc.exists || targetDoc.data().deleted === true) throw new Error('Prova não encontrada.');
-  if (activeSnapshot.docs.some(doc => doc.id !== examId && examsWithRunningAttempts.has(doc.id))) {
-    throw new Error('Existe uma tentativa em andamento na prova atual. Aguarde o término antes de publicar outra prova.');
+  const targetClassId = targetDoc.data().classId || '';
+  const activeForClass = activeSnapshot.docs.filter(doc =>
+    doc.id !== examId
+      && (targetClassId ? doc.data().classId === targetClassId : !doc.data().classId)
+  );
+  if (activeForClass.some(doc => examsWithRunningAttempts.has(doc.id))) {
+    throw new Error('Existe uma tentativa em andamento na prova atual desta turma. Aguarde o término antes de publicar outra prova.');
   }
 
   const batch = db.batch();
-  activeSnapshot.docs.forEach(doc => {
-    if (doc.id !== examId) batch.update(doc.ref, {
+  activeForClass.forEach(doc => {
+    batch.update(doc.ref, {
       active: false,
       archivedAt: firebase.firestore.FieldValue.serverTimestamp(),
       updatedAt: firebase.firestore.FieldValue.serverTimestamp()
@@ -588,6 +790,8 @@ async function listExamResultsOnFreeTier() {
       id: item.id,
       examId: item.examId,
       examTitle: item.examTitle,
+      className: exam.className || '',
+      subjectName: exam.subjectName || '',
       firstName: item.firstName,
       lastName: item.lastName,
       userEmail: item.userEmail,
@@ -773,10 +977,24 @@ const state = {
   examMessage: '',
   pendingIdentity: null,
   studentProfileMessage: '',
+  academicClasses: mergeAcademicClasses(),
+  academicSubjects: [],
+  academicStatus: 'idle',
+  academicMessage: '',
+  studyReferences: [],
+  referencesStatus: 'idle',
+  referencesMessage: '',
+  teacherReferenceTitle: '',
+  teacherReferenceDescription: '',
+  teacherReferenceUrl: '',
+  teacherReferenceClassId: 'entra21',
+  teacherReferenceSubjectId: '',
   examSaveTimer: null,
   examSubmitting: false,
   examAutoSubmitAttempted: false,
   teacherExamTitle: 'Prova de Inglês',
+  teacherExamClassId: 'entra21',
+  teacherExamSubjectId: '',
   teacherQuestions: [createMultipleChoiceDraft()],
   teacherMessage: '',
   examResults: [],
@@ -787,6 +1005,8 @@ const state = {
   teacherExamsMessage: '',
   editingExamId: null,
   editingExamTitle: '',
+  editingExamClassId: '',
+  editingExamSubjectId: '',
   editingExamQuestions: []
 };
 
@@ -806,6 +1026,7 @@ auth.onAuthStateChanged(async (user) => {
       }
       
       await loadLeaderboardFromFirestore();
+      await loadAcademicCatalog();
       state.currentView = getAuthorizedViewFromHash();
       if (!window.location.hash) {
         window.history.replaceState(null, '', '#/');
@@ -814,6 +1035,11 @@ auth.onAuthStateChanged(async (user) => {
       state.user = null;
       state.currentView = 'login';
       state.userStats = createDefaultStats(); // Limpa estado local ao deslogar
+      state.academicClasses = mergeAcademicClasses();
+      state.academicSubjects = [];
+      state.academicStatus = 'idle';
+      state.studyReferences = [];
+      state.referencesStatus = 'idle';
     }
   } catch (error) {
     console.error("Erro crítico no observer de auth:", error);
@@ -1004,7 +1230,7 @@ async function saveStudentProfile(rawProfile) {
       studentProfile: {
         ...profile,
         completed: true,
-        version: 1,
+        version: 2,
         updatedAt: new Date().toISOString()
       }
     };
@@ -1108,6 +1334,15 @@ function escapeHtml(value) {
     .replace(/'/g, '&#039;');
 }
 
+function getSafeExternalUrl(value) {
+  try {
+    const url = new URL(String(value || ''));
+    return ['http:', 'https:'].includes(url.protocol) ? url.toString() : '#';
+  } catch {
+    return '#';
+  }
+}
+
 function getCurrentProfileName() {
   return resolveProfileName({
     nickname: state.userStats.nickname,
@@ -1187,7 +1422,10 @@ const viewRoutes = {
   hub: '#/',
   'english-master': '#/english-master',
   'student-registration': '#/cadastro-do-aluno',
+  'student-references': '#/referencias-de-estudo',
   exam: '#/prova',
+  'teacher-academics': '#/professor/turmas-e-materias',
+  'teacher-references': '#/professor/referencias-de-estudo',
   'teacher-create': '#/professor/criacao-de-prova',
   'teacher-exams': '#/professor/provas-cadastradas',
   'teacher-results': '#/professor/resultados'
@@ -1198,10 +1436,15 @@ function getAuthorizedViewFromHash() {
   const requestedView = Object.entries(viewRoutes).find(([, hash]) => hash === route)?.[0] || 'hub';
   const teacherOnly = requestedView === 'teacher-create'
     || requestedView === 'teacher-exams'
-    || requestedView === 'teacher-results';
+    || requestedView === 'teacher-results'
+    || requestedView === 'teacher-academics'
+    || requestedView === 'teacher-references';
+  const studentOnly = requestedView === 'exam'
+    || requestedView === 'student-registration'
+    || requestedView === 'student-references';
 
   if (teacherOnly && !isAdmin()) return 'hub';
-  if ((requestedView === 'exam' || requestedView === 'student-registration') && isAdmin()) return 'hub';
+  if (studentOnly && isAdmin()) return 'hub';
   return requestedView;
 }
 
@@ -1215,6 +1458,10 @@ window.navigateTo = view => {
   }
   if (view === 'teacher-exams') state.teacherExamsStatus = 'idle';
   if (view === 'teacher-results') state.examResultsStatus = 'idle';
+  if (view === 'teacher-references' || view === 'student-references') {
+    state.referencesStatus = 'idle';
+    state.referencesMessage = '';
+  }
   if (window.location.hash === route) {
     state.currentView = getAuthorizedViewFromHash();
     renderApp();
@@ -1263,8 +1510,11 @@ function renderApp() {
   if (state.currentView === 'hub') renderHubHome();
   else if (state.currentView === 'english-master') renderEnglishMaster();
   else if (state.currentView === 'student-registration' && !isAdmin()) renderStudentRegistration();
+  else if (state.currentView === 'student-references' && !isAdmin()) renderStudentReferences();
   else if (state.currentView === 'quiz') renderQuiz();
   else if (state.currentView === 'exam' && !isAdmin()) renderExamPortal();
+  else if (state.currentView === 'teacher-academics' && isAdmin()) renderTeacherAcademics();
+  else if (state.currentView === 'teacher-references' && isAdmin()) renderTeacherReferences();
   else if (state.currentView === 'teacher-create' && isAdmin()) renderTeacherExamCreator();
   else if (state.currentView === 'teacher-exams' && isAdmin()) renderTeacherExamManager();
   else if (state.currentView === 'teacher-results' && isAdmin()) renderTeacherResults();
@@ -1368,6 +1618,20 @@ function renderHubHome() {
   const modules = [
     ...(isAdmin() ? [
       {
+        view: 'teacher-academics',
+        icon: '▦',
+        kicker: 'Organização acadêmica',
+        title: 'Turmas e matérias',
+        description: 'Cadastre as turmas e matérias utilizadas em provas e materiais.'
+      },
+      {
+        view: 'teacher-references',
+        icon: '⌁',
+        kicker: 'Materiais de estudo',
+        title: 'Gerenciar referências',
+        description: 'Publique links e conteúdos de apoio para cada turma e matéria.'
+      },
+      {
         view: 'teacher-create',
         icon: '✦',
         kicker: 'Avaliações',
@@ -1397,6 +1661,13 @@ function renderHubHome() {
         description: isStudentProfileComplete(state.userStats.studentProfile)
           ? 'Cadastro completo. Revise seus dados compartilhados entre os submódulos.'
           : 'Preencha seus dados para usá-los em todos os submódulos do Magister Hub.'
+      },
+      {
+        view: 'student-references',
+        icon: '⌁',
+        kicker: 'Materiais de estudo',
+        title: 'Referências de estudo',
+        description: 'Consulte links e materiais publicados pelo professor para sua turma.'
       },
       {
         view: 'exam',
@@ -1436,6 +1707,130 @@ function renderHubHome() {
   `;
 }
 
+function renderAcademicOptions(items, selectedId, placeholder) {
+  return `<option value="">${escapeHtml(placeholder)}</option>${items.map(item => `
+    <option value="${escapeHtml(item.id)}" ${item.id === selectedId ? 'selected' : ''}>${escapeHtml(item.name)}</option>
+  `).join('')}`;
+}
+
+function renderAcademicEntityList(items, kind) {
+  if (!items.length) return '<div class="academic-empty">Nenhum cadastro disponível.</div>';
+  return `<div class="academic-entity-list">${items.map(item => `
+    <div class="academic-entity-row">
+      <span><strong>${escapeHtml(item.name)}</strong>${item.builtin ? '<small>Turma padrão</small>' : ''}</span>
+      ${item.builtin ? '' : `<button type="button" class="archive-academic-btn" onclick="window.archiveAcademicEntity('${kind}', '${item.id}')">Arquivar</button>`}
+    </div>
+  `).join('')}</div>`;
+}
+
+function renderTeacherAcademics() {
+  const mainContent = document.getElementById('main-content');
+  mainContent.innerHTML = `
+    <section class="exam-page academic-management-page">
+      <div class="exam-page-heading">
+        <div><span class="eyebrow">Organização acadêmica</span><h2>Turmas e matérias</h2><p>Cadastre os dados usados no perfil dos alunos, nas referências e nas provas.</p></div>
+        <button class="secondary-btn" onclick="window.navigateTo('hub')">Voltar ao Hub</button>
+      </div>
+      ${state.academicMessage ? `<div class="exam-alert ${state.academicMessage.startsWith('Erro:') ? 'error' : 'success'}">${escapeHtml(state.academicMessage)}</div>` : ''}
+      <div class="academic-management-grid">
+        <article class="academic-panel">
+          <div><span class="academic-panel-kicker">Público</span><h3>Turmas</h3><p>Entra21 e JovemProgramador permanecem disponíveis como turmas padrão.</p></div>
+          <form class="academic-inline-form" onsubmit="window.submitAcademicEntity(event, 'class')">
+            <label class="exam-field"><span>Nome da turma</span><input name="name" minlength="2" maxlength="80" required placeholder="Ex.: Turma Noturna 2026" /></label>
+            <button class="next-btn" type="submit">Cadastrar turma</button>
+          </form>
+          ${renderAcademicEntityList(state.academicClasses, 'class')}
+        </article>
+        <article class="academic-panel">
+          <div><span class="academic-panel-kicker">Conteúdo</span><h3>Matérias</h3><p>As matérias serão relacionadas às provas e referências de estudo.</p></div>
+          <form class="academic-inline-form" onsubmit="window.submitAcademicEntity(event, 'subject')">
+            <label class="exam-field"><span>Nome da matéria</span><input name="name" minlength="2" maxlength="80" required placeholder="Ex.: Desenvolvimento Web" /></label>
+            <button class="next-btn" type="submit">Cadastrar matéria</button>
+          </form>
+          ${renderAcademicEntityList(state.academicSubjects, 'subject')}
+        </article>
+      </div>
+    </section>
+  `;
+}
+
+function renderReferenceCards(references, admin = false) {
+  if (!references.length) {
+    return '<div class="exam-empty"><div class="empty-icon">⌁</div><h3>Nenhuma referência publicada</h3><p>Os materiais aparecerão aqui quando forem cadastrados.</p></div>';
+  }
+  return `<div class="study-reference-grid">${references.map(reference => `
+    <article class="study-reference-card">
+      <div class="reference-card-topline"><span>${escapeHtml(reference.subjectName)}</span><small>${formatExamDate(reference.updatedAtMillis || reference.createdAtMillis)}</small></div>
+      <h3>${escapeHtml(reference.title)}</h3>
+      ${reference.description ? `<p>${escapeHtml(reference.description)}</p>` : ''}
+      <div class="reference-audience">${escapeHtml(reference.className)}</div>
+      <div class="reference-actions">
+        <a href="${escapeHtml(getSafeExternalUrl(reference.url))}" target="_blank" rel="noopener noreferrer">Abrir referência ↗</a>
+        ${admin ? `<button type="button" onclick="window.archiveStudyReference('${reference.id}')">Arquivar</button>` : ''}
+      </div>
+    </article>
+  `).join('')}</div>`;
+}
+
+function renderTeacherReferences() {
+  const mainContent = document.getElementById('main-content');
+  if (state.referencesStatus === 'idle') {
+    state.referencesStatus = 'loading';
+    queueMicrotask(async () => {
+      await loadStudyReferences();
+      if (state.currentView === 'teacher-references') renderTeacherReferences();
+    });
+  }
+  const canPublish = state.academicSubjects.length > 0;
+  mainContent.innerHTML = `
+    <section class="exam-page references-management-page">
+      <div class="exam-page-heading">
+        <div><span class="eyebrow">Materiais de estudo</span><h2>Gerenciar referências</h2><p>Publique links de apoio direcionados por turma e matéria.</p></div>
+        <button class="secondary-btn" onclick="window.navigateTo('hub')">Voltar ao Hub</button>
+      </div>
+      ${!canPublish ? '<div class="exam-alert error">Cadastre pelo menos uma matéria antes de publicar referências.</div>' : ''}
+      ${state.referencesMessage ? `<div class="exam-alert ${state.referencesMessage.startsWith('Erro:') ? 'error' : 'success'}">${escapeHtml(state.referencesMessage)}</div>` : ''}
+      <form class="exam-builder reference-builder" onsubmit="window.submitStudyReference(event)">
+        <label class="exam-field"><span>Título</span><input name="title" minlength="3" maxlength="160" required value="${escapeHtml(state.teacherReferenceTitle)}" oninput="window.updateReferenceDraft('title', this.value)" placeholder="Ex.: Guia de JavaScript" /></label>
+        <label class="exam-field"><span>Link</span><input name="url" type="url" maxlength="2048" required value="${escapeHtml(state.teacherReferenceUrl)}" oninput="window.updateReferenceDraft('url', this.value)" placeholder="https://..." /></label>
+        <label class="exam-field"><span>Turma</span><select name="classId" required onchange="window.updateReferenceDraft('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.teacherReferenceClassId, 'Selecione a turma')}</select></label>
+        <label class="exam-field"><span>Matéria</span><select name="subjectId" required onchange="window.updateReferenceDraft('subjectId', this.value)">${renderAcademicOptions(state.academicSubjects, state.teacherReferenceSubjectId, 'Selecione a matéria')}</select></label>
+        <label class="exam-field reference-description-field"><span>Descrição</span><textarea name="description" maxlength="1000" rows="4" oninput="window.updateReferenceDraft('description', this.value)" placeholder="Orientações para o estudo">${escapeHtml(state.teacherReferenceDescription)}</textarea></label>
+        <button class="next-btn reference-submit" type="submit" ${canPublish ? '' : 'disabled'}>Publicar referência</button>
+      </form>
+      <div class="hub-section-heading"><div><span>Publicadas</span><h2>Referências cadastradas</h2></div><small>${state.studyReferences.length} item(ns)</small></div>
+      ${state.referencesStatus === 'loading' ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando referências...</p></div>' : renderReferenceCards(state.studyReferences, true)}
+    </section>
+  `;
+}
+
+function renderStudentReferences() {
+  const mainContent = document.getElementById('main-content');
+  const profile = state.userStats.studentProfile || {};
+  const classId = getProfileClassId(profile, state.academicClasses);
+  if (!isStudentProfileComplete(profile) || !classId) {
+    mainContent.innerHTML = '<section class="exam-page"><div class="exam-empty"><div class="empty-icon">◉</div><h2>Complete seu cadastro</h2><p>Informe sua turma no Cadastro do aluno para visualizar as referências corretas.</p><button class="next-btn" onclick="window.navigateTo(\'student-registration\')">Abrir cadastro</button></div></section>';
+    return;
+  }
+  if (state.referencesStatus === 'idle') {
+    state.referencesStatus = 'loading';
+    queueMicrotask(async () => {
+      await loadStudyReferences();
+      if (state.currentView === 'student-references') renderStudentReferences();
+    });
+  }
+  mainContent.innerHTML = `
+    <section class="exam-page student-references-page">
+      <div class="exam-page-heading">
+        <div><span class="eyebrow">Sua biblioteca</span><h2>Referências de estudo</h2><p>Materiais publicados para a turma <strong>${escapeHtml(profile.className)}</strong>.</p></div>
+        <button class="secondary-btn" onclick="window.navigateTo('hub')">Voltar ao Hub</button>
+      </div>
+      ${state.referencesStatus === 'error' ? `<div class="exam-alert error">${escapeHtml(state.referencesMessage)}</div>` : ''}
+      ${state.referencesStatus === 'loading' ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando referências...</p></div>' : renderReferenceCards(state.studyReferences)}
+    </section>
+  `;
+}
+
 function renderStudentRegistration() {
   state.currentView = 'student-registration';
   const mainContent = document.getElementById('main-content');
@@ -1443,6 +1838,7 @@ function renderStudentRegistration() {
   const fullName = profile.fullName || state.user?.displayName || '';
   const nickname = profile.nickname || state.userStats.nickname || '';
   const email = profile.email || state.user?.email || '';
+  const selectedClassId = getProfileClassId(profile, state.academicClasses);
   const isComplete = isStudentProfileComplete(profile);
   const messageType = state.studentProfileMessage.startsWith('Cadastro salvo') ? 'success' : 'error';
 
@@ -1478,9 +1874,8 @@ function renderStudentRegistration() {
           </label>
           <label class="exam-field">
             <span>Turma</span>
-            <select name="className" required>
-              <option value="">Selecione sua turma</option>
-              ${STUDENT_CLASSES.map(className => `<option value="${className}" ${profile.className === className ? 'selected' : ''}>${className}</option>`).join('')}
+            <select name="classId" required>
+              ${renderAcademicOptions(state.academicClasses, selectedClassId, 'Selecione sua turma')}
             </select>
           </label>
           <label class="exam-field">
@@ -1793,6 +2188,11 @@ function renderTeacherExamCreator() {
           <input type="text" maxlength="120" required value="${escapeHtml(state.teacherExamTitle)}"
             oninput="window.updateTeacherExamTitle(this.value)" placeholder="Ex.: Avaliação de Inglês - Unidade 1" />
         </label>
+        <div class="exam-audience-fields">
+          <label class="exam-field"><span>Turma</span><select required onchange="window.updateTeacherExamAudience('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.teacherExamClassId, 'Selecione a turma')}</select></label>
+          <label class="exam-field"><span>Matéria</span><select required onchange="window.updateTeacherExamAudience('subjectId', this.value)">${renderAcademicOptions(state.academicSubjects, state.teacherExamSubjectId, 'Selecione a matéria')}</select></label>
+        </div>
+        ${state.academicSubjects.length ? '' : '<div class="exam-alert error">Cadastre uma matéria em Turmas e matérias antes de criar a prova.</div>'}
 
         <div class="builder-heading">
           <h3>Perguntas da prova</h3>
@@ -1824,7 +2224,7 @@ function renderTeacherExamCreator() {
 
         ${state.teacherMessage ? `<div class="exam-alert ${state.teacherMessage.startsWith('Prova criada') ? 'success' : 'error'}" role="status">${escapeHtml(state.teacherMessage)}</div>` : ''}
 
-        <button type="submit" class="next-btn confirm-exam-btn">Confirmar Criação</button>
+        <button type="submit" class="next-btn confirm-exam-btn" ${state.academicSubjects.length ? '' : 'disabled'}>Confirmar Criação</button>
       </form>
     </section>
   `;
@@ -1855,6 +2255,7 @@ function renderTeacherExamManager() {
                 </div>
                 <h3>${escapeHtml(exam.title)}</h3>
                 <p>${exam.questionCount} ${exam.questionCount === 1 ? 'questão cadastrada' : 'questões cadastradas'}</p>
+                <div class="exam-academic-meta"><span>${escapeHtml(exam.className || 'Todas as turmas')}</span><span>${escapeHtml(exam.subjectName || 'Matéria não informada')}</span></div>
                 <div class="registered-exam-actions">
                   <button class="secondary-btn" onclick="window.startEditingExam('${exam.id}')">Editar</button>
                   ${exam.active
@@ -1888,6 +2289,11 @@ function renderTeacherExamEditor(mainContent) {
       </div>
       <form class="exam-builder" onsubmit="window.submitExamUpdate(event)">
         <label class="exam-field"><span>Título da prova</span><input type="text" maxlength="120" required value="${escapeHtml(state.editingExamTitle)}" oninput="window.updateEditingExamTitle(this.value)" /></label>
+        <div class="exam-audience-fields">
+          <label class="exam-field"><span>Turma</span><select required onchange="window.updateEditingExamAudience('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.editingExamClassId, 'Selecione a turma')}</select></label>
+          <label class="exam-field"><span>Matéria</span><select required onchange="window.updateEditingExamAudience('subjectId', this.value)">${renderAcademicOptions(state.academicSubjects, state.editingExamSubjectId, 'Selecione a matéria')}</select></label>
+        </div>
+        ${state.academicSubjects.length ? '' : '<div class="exam-alert error">Cadastre uma matéria em Turmas e matérias antes de salvar a prova.</div>'}
         <div class="builder-heading"><h3>Perguntas da prova</h3><span>${state.editingExamQuestions.length} ${state.editingExamQuestions.length === 1 ? 'questão' : 'questões'}</span></div>
         <div class="question-builder-list">
           ${state.editingExamQuestions.map((item, index) => `
@@ -1904,7 +2310,7 @@ function renderTeacherExamEditor(mainContent) {
         </div>
         <button type="button" class="add-question-btn" onclick="window.addEditingExamQuestion()"><span aria-hidden="true">+</span> Adicionar pergunta</button>
         ${state.teacherExamsMessage ? `<div class="exam-alert ${state.teacherExamsMessage.startsWith('Erro:') ? 'error' : 'success'}">${escapeHtml(state.teacherExamsMessage)}</div>` : ''}
-        <button type="submit" class="next-btn confirm-exam-btn">Salvar alterações</button>
+        <button type="submit" class="next-btn confirm-exam-btn" ${state.academicSubjects.length ? '' : 'disabled'}>Salvar alterações</button>
       </form>
     </section>
   `;
@@ -1964,7 +2370,7 @@ function renderTeacherResults() {
                 ${state.examResults.map(result => `
                   <tr>
                     <td><strong>${escapeHtml(`${result.firstName} ${result.lastName}`)}</strong><small>${escapeHtml(result.userEmail || '')}</small></td>
-                    <td>${escapeHtml(result.examTitle || 'Prova')}</td>
+                    <td>${escapeHtml(result.examTitle || 'Prova')}<small>${escapeHtml([result.className, result.subjectName].filter(Boolean).join(' · ') || 'Dados acadêmicos não informados')}</small></td>
                     <td>${formatExamTime(result.elapsedSeconds)}</td>
                     <td>${renderTeacherResultGrade(result)}</td>
                     <td>${formatExamDate(result.submittedAtMillis)}</td>
@@ -2475,6 +2881,11 @@ window.updateTeacherExamTitle = value => {
   state.teacherExamTitle = value;
 };
 
+window.updateTeacherExamAudience = (field, value) => {
+  if (field === 'classId') state.teacherExamClassId = value;
+  if (field === 'subjectId') state.teacherExamSubjectId = value;
+};
+
 window.updateTeacherQuestion = (index, field, value) => {
   if (!state.teacherQuestions[index] || field !== 'prompt') return;
   state.teacherQuestions[index].prompt = value;
@@ -2539,10 +2950,14 @@ window.submitExamCreation = async event => {
   try {
     const result = await callExamApi('createExam', {
       title: state.teacherExamTitle,
+      classId: state.teacherExamClassId,
+      subjectId: state.teacherExamSubjectId,
       questions: state.teacherQuestions
     });
     state.teacherMessage = `Prova criada com sucesso: ${result.questionCount} questão(ões) publicada(s).`;
     state.teacherExamTitle = 'Prova de Inglês';
+    state.teacherExamClassId = 'entra21';
+    state.teacherExamSubjectId = '';
     state.teacherQuestions = [createMultipleChoiceDraft()];
     state.teacherExamsStatus = 'idle';
     state.examResultsStatus = 'idle';
@@ -2593,6 +3008,8 @@ window.startEditingExam = async examId => {
   }));
   state.editingExamId = exam.id;
   state.editingExamTitle = exam.title;
+  state.editingExamClassId = exam.classId || 'entra21';
+  state.editingExamSubjectId = exam.subjectId || '';
   state.editingExamQuestions = questions;
   state.teacherExamsStatus = 'ready';
   renderTeacherExamManager();
@@ -2601,6 +3018,8 @@ window.startEditingExam = async examId => {
 window.cancelExamEditing = () => {
   state.editingExamId = null;
   state.editingExamTitle = '';
+  state.editingExamClassId = '';
+  state.editingExamSubjectId = '';
   state.editingExamQuestions = [];
   state.teacherExamsMessage = '';
   renderTeacherExamManager();
@@ -2608,6 +3027,11 @@ window.cancelExamEditing = () => {
 
 window.updateEditingExamTitle = value => {
   state.editingExamTitle = value;
+};
+
+window.updateEditingExamAudience = (field, value) => {
+  if (field === 'classId') state.editingExamClassId = value;
+  if (field === 'subjectId') state.editingExamSubjectId = value;
 };
 
 window.updateEditingExamQuestion = (index, field, value) => {
@@ -2680,10 +3104,14 @@ window.submitExamUpdate = async event => {
     const result = await callExamApi('updateExam', {
       examId: state.editingExamId,
       title: state.editingExamTitle,
+      classId: state.editingExamClassId,
+      subjectId: state.editingExamSubjectId,
       questions: state.editingExamQuestions
     });
     state.editingExamId = null;
     state.editingExamTitle = '';
+    state.editingExamClassId = '';
+    state.editingExamSubjectId = '';
     state.editingExamQuestions = [];
     state.teacherExamsMessage = result.versioned
       ? 'Nova versão da prova criada com sucesso. Resultados da versão anterior foram preservados.'
@@ -2786,15 +3214,99 @@ window.refreshExamResults = () => {
   renderTeacherResults();
 };
 
+window.updateReferenceDraft = (field, value) => {
+  const fields = {
+    title: 'teacherReferenceTitle',
+    description: 'teacherReferenceDescription',
+    url: 'teacherReferenceUrl',
+    classId: 'teacherReferenceClassId',
+    subjectId: 'teacherReferenceSubjectId'
+  };
+  if (fields[field]) state[fields[field]] = value;
+};
+
+window.submitAcademicEntity = async (event, kind) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  const name = new FormData(form).get('name');
+  if (button) button.disabled = true;
+  state.academicMessage = '';
+  try {
+    const result = await createAcademicEntityOnFreeTier(kind, name);
+    state.academicMessage = `${kind === 'class' ? 'Turma' : 'Matéria'} "${result.name}" cadastrada com sucesso.`;
+    form.reset();
+  } catch (error) {
+    state.academicMessage = `Erro: ${getFriendlyError(error, 'Não foi possível cadastrar.')}`;
+  }
+  renderTeacherAcademics();
+};
+
+window.archiveAcademicEntity = async (kind, id) => {
+  if (!window.confirm(`Arquivar esta ${kind === 'class' ? 'turma' : 'matéria'}? Cadastros e resultados anteriores serão preservados.`)) return;
+  state.academicMessage = '';
+  try {
+    await archiveAcademicEntityOnFreeTier(kind, id);
+    state.academicMessage = `${kind === 'class' ? 'Turma' : 'Matéria'} arquivada com sucesso.`;
+  } catch (error) {
+    state.academicMessage = `Erro: ${getFriendlyError(error, 'Não foi possível arquivar.')}`;
+  }
+  renderTeacherAcademics();
+};
+
+window.submitStudyReference = async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const button = form.querySelector('button[type="submit"]');
+  const formData = new FormData(form);
+  const data = {
+    title: formData.get('title'),
+    description: formData.get('description'),
+    url: formData.get('url'),
+    classId: formData.get('classId'),
+    subjectId: formData.get('subjectId')
+  };
+  Object.entries(data).forEach(([field, value]) => window.updateReferenceDraft(field, String(value || '')));
+  if (button) button.disabled = true;
+  state.referencesMessage = '';
+  try {
+    await createStudyReferenceOnFreeTier(data);
+    state.referencesMessage = 'Referência publicada com sucesso.';
+    state.teacherReferenceTitle = '';
+    state.teacherReferenceDescription = '';
+    state.teacherReferenceUrl = '';
+    await loadStudyReferences();
+  } catch (error) {
+    state.referencesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível publicar a referência.')}`;
+  }
+  renderTeacherReferences();
+};
+
+window.archiveStudyReference = async referenceId => {
+  if (!window.confirm('Arquivar esta referência? Ela deixará de aparecer para os alunos.')) return;
+  state.referencesMessage = '';
+  try {
+    await archiveStudyReferenceOnFreeTier(referenceId);
+    state.referencesMessage = 'Referência arquivada com sucesso.';
+    await loadStudyReferences();
+  } catch (error) {
+    state.referencesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível arquivar a referência.')}`;
+  }
+  renderTeacherReferences();
+};
+
 window.submitStudentRegistration = async event => {
   event.preventDefault();
   const form = event.currentTarget;
   const submitButton = form.querySelector('button[type="submit"]');
   const formData = new FormData(form);
+  const selectedClassId = String(formData.get('classId') || '');
+  const selectedClass = state.academicClasses.find(item => item.id === selectedClassId);
   const rawProfile = {
     fullName: formData.get('fullName'),
     nickname: formData.get('nickname'),
-    className: formData.get('className'),
+    classId: selectedClassId,
+    className: selectedClass?.name || '',
     courseGoal: formData.get('courseGoal'),
     email: formData.get('email')
   };

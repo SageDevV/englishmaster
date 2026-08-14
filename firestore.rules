@@ -42,6 +42,11 @@ service cloud.firestore {
         && request.resource.data.examSnapshot.gradingSalt == exam.data.gradingSalt
         && request.resource.data.answers is list
         && request.resource.data.answers.size() == exam.data.questionCount
+        && (!exam.data.keys().hasAny(['classId'])
+          || (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
+            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.classId == exam.data.classId)
+          || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
+            && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.className == exam.data.className))
         && exam.data.active == true
         && (!exam.data.keys().hasAny(['deleted']) || exam.data.deleted == false);
     }
@@ -170,6 +175,31 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if signedIn();
       allow create, update: if ownsUser(userId);
+      allow delete: if false;
+    }
+
+    match /academicClasses/{classId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /academicSubjects/{subjectId} {
+      allow read: if signedIn();
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /studyReferences/{referenceId} {
+      allow read: if isAdmin()
+        || (signedIn()
+          && resource.data.active == true
+          && resource.data.deleted == false
+          && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.classId == resource.data.classId)
+            || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.className == resource.data.className)));
+      allow create, update: if isAdmin();
       allow delete: if false;
     }
 

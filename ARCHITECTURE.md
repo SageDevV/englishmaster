@@ -16,8 +16,11 @@ O antigo aplicativo principal foi preservado como o submódulo **English Master*
 | `#/` | `hub` | Dashboard principal do Magister Hub |
 | `#/english-master` | `english-master` | Submódulo de aprendizagem de inglês |
 | `#/cadastro-do-aluno` | `student-registration` | Cadastro global, disponível somente para alunos |
+| `#/referencias-de-estudo` | `student-references` | Referências publicadas para a turma do aluno |
 | `https://codeescape-c9e1b.web.app/` | externo | CodeScape, escape room de algoritmos, aberto em nova guia |
 | `#/prova` | `exam` | Avaliação do aluno |
+| `#/professor/turmas-e-materias` | `teacher-academics` | Cadastro e arquivamento de turmas e matérias |
+| `#/professor/referencias-de-estudo` | `teacher-references` | Publicação e gestão de referências por turma/matéria |
 | `#/professor/criacao-de-prova` | `teacher-create` | Criação de avaliações |
 | `#/professor/provas-cadastradas` | `teacher-exams` | Gestão e ativação de provas |
 | `#/professor/resultados` | `teacher-results` | Resultados dos alunos |
@@ -32,6 +35,9 @@ O CodeScape é um submódulo hospedado externamente. Seu link fica em `updateHea
 - `renderHubHome()`: dashboard e cartões dos módulos disponíveis.
 - `renderHubModuleCard()`: unidade visual reutilizável do menu do Hub.
 - `renderStudentRegistration()`: formulário do perfil global exclusivo do aluno.
+- `renderStudentReferences()`: biblioteca filtrada pela turma do aluno.
+- `renderTeacherAcademics()`: gestão de turmas e matérias.
+- `renderTeacherReferences()`: publicação e arquivamento de materiais de estudo.
 - `renderEnglishMaster()`: página inicial do submódulo English Master.
 - `renderApp()`: resolve a view atual e chama o renderizador correspondente.
 - `updateHeader()`: navegação compartilhada entre Hub, submódulos e ferramentas.
@@ -67,6 +73,19 @@ As duas paletas sobrescrevem as mesmas variáveis sem duplicar os componentes:
 
 Novos componentes devem consumir essas variáveis em vez de cores fixas. Cores semânticas, como erro e sucesso, podem continuar específicas.
 
+## Organização acadêmica
+
+O professor administra o catálogo compartilhado usando duas coleções com arquivamento lógico:
+
+- `academicClasses`: turmas adicionais; `Entra21` (`entra21`) e `JovemProgramador` (`jovemprogramador`) permanecem disponíveis como defaults da aplicação.
+- `academicSubjects`: matérias utilizadas nas referências e avaliações.
+
+Cada item armazena `name`, `nameKey`, `active`, `deleted`, autoria e timestamps. Somente o professor pode criar ou atualizar; usuários autenticados podem ler o catálogo para preencher seus formulários.
+
+As referências ficam em `studyReferences` e contêm título, descrição, URL, `classId/className` e `subjectId/subjectName`. O aluno consulta apenas documentos ativos da própria `studentProfile.classId`; perfis antigos sem `classId` são migrados por correspondência normalizada de `className`.
+
+Novas provas exigem turma e matéria. O documento da prova preserva os quatro campos acadêmicos e a aplicação mantém uma prova ativa independente por turma. A regra de criação da tentativa confirma que a turma do perfil corresponde à turma da prova, mantendo compatibilidade com avaliações legadas sem `classId`.
+
 ## Perfil global do aluno
 
 O cadastro do aluno usa o documento canônico `users/{uid}`, no mesmo projeto Firebase do Hub. Os campos específicos ficam em `studentProfile`:
@@ -76,11 +95,12 @@ O cadastro do aluno usa o documento canônico `users/{uid}`, no mesmo projeto Fi
   fullName: string,
   nickname: string,
   nicknameKey: string,
-  className: 'Entra21' | 'JovemProgramador',
+  classId: string,
+  className: string,
   courseGoal: string,
   email: string,
   completed: true,
-  version: 1,
+  version: 2,
   updatedAt: string
 }
 ```
