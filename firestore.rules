@@ -324,6 +324,19 @@ service cloud.firestore {
       allow delete: if false;
     }
 
+    match /communityPosts/{postId} {
+      allow read: if isAdmin()
+        || (signedIn()
+          && resource.data.active == true
+          && resource.data.deleted == false
+          && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.classId == resource.data.classId)
+            || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
+              && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.className == resource.data.className)));
+      allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
 
     match /activities/{activityId} {
       allow read: if isAdmin()

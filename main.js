@@ -57,6 +57,11 @@ import {
 } from './src/services/academicServices.js';
 import { validateActivity } from './src/services/activityServices.js';
 import {
+  filterCommunityPosts,
+  MAX_COMMUNITY_POST_CONTENT_LENGTH,
+  validateCommunityPost
+} from './src/services/communityServices.js';
+import {
   isStudentProfileComplete,
   splitStudentFullName,
   validateStudentProfile
@@ -380,6 +385,86 @@ async function loadStudyReferences() {
   }
 }
 
+
+function serializeCommunityPost(doc) {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    title: data.title || '',
+    content: data.content || '',
+    url: data.url || '',
+    classId: data.classId || '',
+    className: data.className || '',
+    subjectId: data.subjectId || '',
+    subjectName: data.subjectName || '',
+    authorName: data.authorName || 'Professor',
+    authorEmail: data.authorEmail || '',
+    active: data.active !== false,
+    deleted: data.deleted === true,
+    createdAtMillis: timestampToMillis(data.createdAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt)
+  };
+}
+
+async function createCommunityPostOnFreeTier(data) {
+  if (!isAdmin()) throw new Error('Somente o professor pode publicar na Comunidade.');
+  const post = validateCommunityPost(data, state.academicClasses, state.academicSubjects);
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  const docRef = await db.collection('communityPosts').add({
+    ...post,
+    authorName: state.user.displayName || 'Professor',
+    authorEmail: state.user.email || '',
+    active: true,
+    deleted: false,
+    createdBy: state.user.uid,
+    createdAt: serverTimestamp,
+    updatedAt: serverTimestamp
+  });
+  return { ok: true, id: docRef.id };
+}
+
+async function archiveCommunityPostOnFreeTier(postId) {
+  if (!isAdmin()) throw new Error('Somente o professor pode arquivar posts.');
+  await db.collection('communityPosts').doc(String(postId || '')).update({
+    active: false,
+    deleted: true,
+    deletedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true };
+}
+
+async function loadCommunityPosts() {
+  if (!state.user) return;
+  state.communityStatus = 'loading';
+  try {
+    let query = db.collection('communityPosts');
+    if (!isAdmin()) {
+      const classId = getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses);
+      if (!classId) {
+        state.communityPosts = [];
+        state.communityStatus = 'ready';
+        return;
+      }
+      query = query
+        .where('classId', '==', classId)
+        .where('active', '==', true)
+        .where('deleted', '==', false);
+    }
+    const snapshot = await query.get();
+    state.communityPosts = snapshot.docs
+      .map(serializeCommunityPost)
+      .filter(post => post.active && !post.deleted)
+      .sort((a, b) => (b.createdAtMillis || b.updatedAtMillis) - (a.createdAtMillis || a.updatedAtMillis));
+    state.communityStatus = 'ready';
+    state.communityMessage = '';
+  } catch (error) {
+    console.error('Erro ao carregar Comunidade:', error);
+    state.communityPosts = [];
+    state.communityStatus = 'error';
+    state.communityMessage = getFriendlyError(error, 'Não foi possível carregar a Comunidade.');
+  }
+}
 
 function serializeActivityDocument(doc) {
   const data = doc.data();
@@ -1490,6 +1575,15 @@ const state = {
   studyReferences: [],
   referencesStatus: 'idle',
   referencesMessage: '',
+  communityPosts: [],
+  communityStatus: 'idle',
+  communityMessage: '',
+  communityFilters: { classId: '', subjectId: '' },
+  communityDraftTitle: '',
+  communityDraftContent: '',
+  communityDraftUrl: '',
+  communityDraftClassId: 'entra21',
+  communityDraftSubjectId: '',
   newsletterItems: [],
   newsletterStatus: 'idle',
   newsletterErrors: [],
@@ -1584,6 +1678,15 @@ auth.onAuthStateChanged(async (user) => {
       state.academicStatus = 'idle';
       state.studyReferences = [];
       state.referencesStatus = 'idle';
+      state.communityPosts = [];
+      state.communityStatus = 'idle';
+      state.communityMessage = '';
+      state.communityFilters = { classId: '', subjectId: '' };
+      state.communityDraftTitle = '';
+      state.communityDraftContent = '';
+      state.communityDraftUrl = '';
+      state.communityDraftClassId = 'entra21';
+      state.communityDraftSubjectId = '';
       state.newsletterItems = [];
       state.newsletterStatus = 'idle';
       state.newsletterErrors = [];
@@ -1994,6 +2097,7 @@ function addXP(amount) {
 // --- Application Routes ---
 const viewRoutes = {
   hub: '#/',
+  community: '#/comunidade',
   newsletter: '#/newsletter',
   'english-master': '#/english-master',
   'student-registration': '#/cadastro-do-aluno',
@@ -2050,6 +2154,10 @@ window.navigateTo = view => {
     state.teacherPerformanceMessage = '';
   }
   if (view === 'teacher-results') state.examResultsStatus = 'idle';
+  if (view === 'community') {
+    state.communityStatus = 'idle';
+    state.communityMessage = '';
+  }
   if (view === 'teacher-references' || view === 'student-references') {
     state.referencesStatus = 'idle';
     state.referencesMessage = '';
@@ -2087,17 +2195,24 @@ function isEnglishMasterView() {
 function applyViewTheme() {
   const englishMasterActive = isEnglishMasterView();
   const newsletterActive = state.currentView === 'newsletter';
+  const communityActive = state.currentView === 'community';
   document.body.dataset.module = englishMasterActive ? 'english-master' : (newsletterActive ? 'newsletter' : 'hub');
   document.title = englishMasterActive
     ? 'English Master | Magister Hub'
-    : (newsletterActive ? 'Newsletter Dev | Magister Hub' : 'Magister Hub');
+    : newsletterActive
+      ? 'Newsletter Dev | Magister Hub'
+      : communityActive
+        ? 'Comunidade | Magister Hub'
+        : 'Magister Hub';
   const subtitle = document.querySelector('header > p');
   if (subtitle) {
     subtitle.textContent = englishMasterActive
       ? 'English Master · Aprendizado interativo de inglês'
-      : (newsletterActive
+      : newsletterActive
         ? 'Newsletter Dev · Curadoria das comunidades de tecnologia'
-        : 'Magister Hub · Seu hub de ferramentas educacionais');
+        : communityActive
+          ? 'Comunidade · Conteúdos do professor para sua turma'
+          : 'Magister Hub · Seu hub de ferramentas educacionais';
   }
 }
 
@@ -2110,6 +2225,7 @@ function renderApp() {
 
   updateHeader();
   if (state.currentView === 'hub') renderHubHome();
+  else if (state.currentView === 'community') renderCommunity();
   else if (state.currentView === 'newsletter') renderNewsletter();
   else if (state.currentView === 'english-master') renderEnglishMaster();
   else if (state.currentView === 'student-registration' && !isAdmin()) renderStudentRegistration();
@@ -2192,6 +2308,7 @@ function updateHeader() {
 
     <nav class="app-nav" aria-label="Navegação principal">
       <button class="nav-btn ${state.currentView === 'hub' ? 'active' : ''}" onclick="window.navigateTo('hub')">Hub</button>
+      <button class="nav-btn ${state.currentView === 'community' ? 'active' : ''}" onclick="window.navigateTo('community')">Comunidade</button>
       <button class="nav-btn ${state.currentView === 'newsletter' ? 'active' : ''}" onclick="window.navigateTo('newsletter')">Newsletter</button>
       <button class="nav-btn ${isEnglishMasterView() ? 'active' : ''}" onclick="window.navigateTo('english-master')">English Master</button>
       <a class="nav-btn external-nav-btn" href="https://codeescape-c9e1b.web.app/" target="_blank" rel="noopener noreferrer" aria-label="Abrir CodeScape em uma nova guia">CodeScape <span aria-hidden="true">↗</span></a>
@@ -2206,6 +2323,216 @@ function updateHeader() {
     </div>
   `;
 }
+
+function formatCommunityDate(value) {
+  const date = new Date(Number(value || 0));
+  if (Number.isNaN(date.getTime()) || !date.getTime()) return 'Agora';
+  return new Intl.DateTimeFormat('pt-BR', {
+    day: '2-digit',
+    month: 'short',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  }).format(date);
+}
+
+function getCommunityAuthorInitials(name) {
+  const parts = String(name || 'Professor').trim().split(/\s+/).filter(Boolean);
+  return (parts.length > 1 ? `${parts[0][0]}${parts.at(-1)[0]}` : parts[0]?.slice(0, 2) || 'PR').toUpperCase();
+}
+
+function renderCommunityPostCards(posts) {
+  if (!posts.length) {
+    return `<div class="community-empty"><span aria-hidden="true">◎</span><h3>Nenhuma publicação encontrada</h3><p>${isAdmin() ? 'Publique o primeiro conteúdo ou altere os filtros selecionados.' : 'O professor ainda não publicou conteúdo para esta turma e matéria.'}</p></div>`;
+  }
+  return `<div class="community-feed">${posts.map(post => `
+    <article class="community-post-card">
+      <div class="community-post-author">
+        <div class="community-author-avatar" aria-hidden="true">${escapeHtml(getCommunityAuthorInitials(post.authorName))}</div>
+        <div><strong>${escapeHtml(post.authorName)}</strong><span>Professor · ${escapeHtml(post.className)}</span></div>
+        <time>${escapeHtml(formatCommunityDate(post.createdAtMillis || post.updatedAtMillis))}</time>
+      </div>
+      <div class="community-post-audience">
+        <span>${escapeHtml(post.subjectName)}</span><small>Turma ${escapeHtml(post.className)}</small>
+      </div>
+      <h2>${escapeHtml(post.title)}</h2>
+      <div class="community-post-content">${escapeHtml(post.content)}</div>
+      <div class="community-post-footer">
+        ${post.url ? `<a href="${escapeHtml(getSafeExternalUrl(post.url))}" target="_blank" rel="noopener noreferrer">Abrir conteúdo relacionado <span aria-hidden="true">↗</span></a>` : '<span class="community-text-post-label">Publicação em texto</span>'}
+        ${isAdmin() ? `<button type="button" onclick="window.archiveCommunityPost('${post.id}')">Arquivar publicação</button>` : ''}
+      </div>
+    </article>
+  `).join('')}</div>`;
+}
+
+function renderCommunityFilters(profileClassId = '', profileClassName = '') {
+  const selectedClassId = isAdmin() ? state.communityFilters.classId : profileClassId;
+  const subjects = selectedClassId
+    ? getSubjectsForClass(state.academicSubjects, selectedClassId)
+    : state.academicSubjects;
+  const hasFilters = isAdmin()
+    ? Boolean(state.communityFilters.classId || state.communityFilters.subjectId)
+    : Boolean(state.communityFilters.subjectId);
+  return `
+    <div class="community-filters">
+      ${isAdmin()
+        ? `<label class="exam-field"><span>Turma</span><select onchange="window.updateCommunityFilter('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.communityFilters.classId, 'Todas as turmas')}</select></label>`
+        : `<label class="exam-field"><span>Turma</span><select disabled><option>${escapeHtml(profileClassName || 'Sua turma')}</option></select></label>`}
+      <label class="exam-field"><span>Matéria</span><select onchange="window.updateCommunityFilter('subjectId', this.value)">${renderAcademicOptions(subjects, state.communityFilters.subjectId, 'Todas as matérias')}</select></label>
+      <button type="button" class="secondary-btn" onclick="window.clearCommunityFilters()" ${hasFilters ? '' : 'disabled'}>Limpar filtros</button>
+    </div>
+  `;
+}
+
+function renderCommunityComposer() {
+  const subjects = getSubjectsForClass(state.academicSubjects, state.communityDraftClassId);
+  const canPublish = subjects.length > 0;
+  return `
+    <section class="community-composer" aria-labelledby="community-composer-title">
+      <div class="community-composer-heading">
+        <div class="community-author-avatar">${escapeHtml(getCommunityAuthorInitials(state.user.displayName || 'Professor'))}</div>
+        <div><span>PUBLICAÇÃO DO PROFESSOR</span><h2 id="community-composer-title">Compartilhe com a turma</h2><p>Apenas o professor pode criar publicações.</p></div>
+      </div>
+      ${!canPublish ? '<div class="exam-alert error">Cadastre uma matéria para a turma selecionada antes de publicar.</div>' : ''}
+      <form class="community-composer-form" onsubmit="window.submitCommunityPost(event)">
+        <label class="exam-field community-title-field"><span>Título</span><input minlength="3" maxlength="160" required value="${escapeHtml(state.communityDraftTitle)}" oninput="window.updateCommunityDraft('title', this.value)" placeholder="Ex.: Materiais e avisos da semana" /></label>
+        <label class="exam-field"><span>Turma</span><select required onchange="window.updateCommunityDraft('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.communityDraftClassId, 'Selecione a turma')}</select></label>
+        <label class="exam-field"><span>Matéria</span><select required onchange="window.updateCommunityDraft('subjectId', this.value)">${renderAcademicOptions(subjects, state.communityDraftSubjectId, 'Selecione a matéria')}</select></label>
+        <label class="exam-field community-content-field"><span>Conteúdo</span><textarea minlength="3" maxlength="${MAX_COMMUNITY_POST_CONTENT_LENGTH}" rows="7" required oninput="window.updateCommunityDraft('content', this.value)" placeholder="Escreva um aviso, dica, explicação ou conteúdo para os alunos...">${escapeHtml(state.communityDraftContent)}</textarea><small><span id="community-content-count">${state.communityDraftContent.length}</span>/${MAX_COMMUNITY_POST_CONTENT_LENGTH} caracteres</small></label>
+        <label class="exam-field community-link-field"><span>Link relacionado <small>(opcional)</small></span><input type="url" maxlength="2048" value="${escapeHtml(state.communityDraftUrl)}" oninput="window.updateCommunityDraft('url', this.value)" placeholder="https://..." /></label>
+        <button class="next-btn community-publish-btn" type="submit" ${canPublish ? '' : 'disabled'}><span aria-hidden="true">↑</span> Publicar na Comunidade</button>
+      </form>
+    </section>
+  `;
+}
+
+function renderCommunity() {
+  const mainContent = document.getElementById('main-content');
+  const profile = state.userStats.studentProfile || {};
+  const profileClassId = isAdmin() ? '' : getProfileClassId(profile, state.academicClasses);
+  if (!isAdmin() && (!isStudentProfileComplete(profile) || !profileClassId)) {
+    mainContent.innerHTML = '<section class="exam-page"><div class="exam-empty"><div class="empty-icon">◉</div><h2>Complete seu cadastro</h2><p>Informe sua turma para acessar as publicações da Comunidade.</p><button class="next-btn" onclick="window.navigateTo(\'student-registration\')">Abrir cadastro</button></div></section>';
+    return;
+  }
+  if (!isAdmin()) state.communityFilters.classId = profileClassId;
+  if (state.communityStatus === 'idle') {
+    state.communityStatus = 'loading';
+    queueMicrotask(async () => {
+      await loadCommunityPosts();
+      if (state.currentView === 'community') renderCommunity();
+    });
+  }
+  const filteredPosts = filterCommunityPosts(state.communityPosts, {
+    classId: isAdmin() ? state.communityFilters.classId : profileClassId,
+    subjectId: state.communityFilters.subjectId
+  });
+  const statusContent = state.communityStatus === 'loading'
+    ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando publicações...</p></div>'
+    : state.communityStatus === 'error'
+      ? `<div class="exam-empty"><h3>Não foi possível carregar a Comunidade</h3><p>${escapeHtml(state.communityMessage)}</p><button class="next-btn" onclick="window.refreshCommunity()">Tentar novamente</button></div>`
+      : renderCommunityPostCards(filteredPosts);
+
+  mainContent.innerHTML = `
+    <section class="community-page">
+      <div class="community-hero">
+        <div><span class="community-eyebrow">COMUNIDADE MAGISTER</span><h1>Conteúdo que aproxima professor e turma.</h1><p>Avisos, dicas, materiais e discussões organizados por turma e matéria.</p></div>
+        <div class="community-hero-badge"><span aria-hidden="true">◎</span><strong>${isAdmin() ? 'Você publica' : 'Sua turma conectada'}</strong><small>${isAdmin() ? 'Os alunos acompanham' : 'Conteúdo publicado pelo professor'}</small></div>
+      </div>
+      ${state.communityMessage && state.communityStatus !== 'error' ? `<div class="exam-alert ${state.communityMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.communityMessage)}</div>` : ''}
+      ${isAdmin() ? renderCommunityComposer() : ''}
+      <div class="community-feed-heading">
+        <div><span>FEED DA COMUNIDADE</span><h2>Publicações</h2><p>${isAdmin() ? 'Visualize o conteúdo publicado para todas as turmas.' : `Conteúdo disponível para ${escapeHtml(profile.className)}.`}</p></div>
+        <button class="secondary-btn" onclick="window.refreshCommunity()">Atualizar feed</button>
+      </div>
+      ${renderCommunityFilters(profileClassId, profile.className)}
+      <div class="community-feed-summary"><span><strong>${filteredPosts.length}</strong> ${filteredPosts.length === 1 ? 'publicação' : 'publicações'}</span><small>Mais recentes primeiro</small></div>
+      ${statusContent}
+    </section>
+  `;
+}
+
+window.updateCommunityDraft = (field, value) => {
+  const fields = {
+    title: 'communityDraftTitle',
+    content: 'communityDraftContent',
+    url: 'communityDraftUrl',
+    classId: 'communityDraftClassId',
+    subjectId: 'communityDraftSubjectId'
+  };
+  if (!fields[field]) return;
+  state[fields[field]] = String(value || '');
+  if (field === 'content') {
+    const counter = document.getElementById('community-content-count');
+    if (counter) counter.textContent = String(state.communityDraftContent.length);
+  }
+  if (field === 'classId') {
+    const subjects = getSubjectsForClass(state.academicSubjects, state.communityDraftClassId);
+    if (!subjects.some(subject => subject.id === state.communityDraftSubjectId)) state.communityDraftSubjectId = '';
+    renderCommunity();
+  }
+};
+
+window.submitCommunityPost = async event => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  state.communityMessage = '';
+  try {
+    await createCommunityPostOnFreeTier({
+      title: state.communityDraftTitle,
+      content: state.communityDraftContent,
+      url: state.communityDraftUrl,
+      classId: state.communityDraftClassId,
+      subjectId: state.communityDraftSubjectId
+    });
+    state.communityDraftTitle = '';
+    state.communityDraftContent = '';
+    state.communityDraftUrl = '';
+    await loadCommunityPosts();
+    state.communityMessage = 'Publicação criada com sucesso.';
+  } catch (error) {
+    state.communityMessage = `Erro: ${getFriendlyError(error, 'Não foi possível publicar agora.')}`;
+  }
+  renderCommunity();
+};
+
+window.archiveCommunityPost = async postId => {
+  if (!window.confirm('Arquivar esta publicação? Ela deixará de aparecer para os alunos.')) return;
+  state.communityMessage = '';
+  try {
+    await archiveCommunityPostOnFreeTier(postId);
+    await loadCommunityPosts();
+    state.communityMessage = 'Publicação arquivada com sucesso.';
+  } catch (error) {
+    state.communityMessage = `Erro: ${getFriendlyError(error, 'Não foi possível arquivar a publicação.')}`;
+  }
+  renderCommunity();
+};
+
+window.updateCommunityFilter = (field, value) => {
+  if (!['classId', 'subjectId'].includes(field)) return;
+  if (!isAdmin() && field === 'classId') return;
+  state.communityFilters[field] = String(value || '');
+  if (field === 'classId') {
+    const subjects = state.communityFilters.classId
+      ? getSubjectsForClass(state.academicSubjects, state.communityFilters.classId)
+      : state.academicSubjects;
+    if (!subjects.some(subject => subject.id === state.communityFilters.subjectId)) state.communityFilters.subjectId = '';
+  }
+  renderCommunity();
+};
+
+window.clearCommunityFilters = () => {
+  const profileClassId = isAdmin() ? '' : getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses);
+  state.communityFilters = { classId: profileClassId, subjectId: '' };
+  renderCommunity();
+};
+
+window.refreshCommunity = () => {
+  state.communityStatus = 'idle';
+  state.communityMessage = '';
+  renderCommunity();
+};
 
 function formatNewsletterDate(value) {
   const date = new Date(value);
