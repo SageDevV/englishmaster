@@ -62,6 +62,12 @@ import {
   validateStudentProfile
 } from './src/services/studentProfileServices.js';
 import {
+  filterNewsletterItems,
+  loadDeveloperNews,
+  NEWSLETTER_CATEGORIES,
+  NEWSLETTER_SOURCES
+} from './src/services/newsletterServices.js';
+import {
   buildTeacherStudentGroups,
   filterTeacherResults,
   getTeacherResultFilterOptions
@@ -1482,6 +1488,14 @@ const state = {
   studyReferences: [],
   referencesStatus: 'idle',
   referencesMessage: '',
+  newsletterItems: [],
+  newsletterStatus: 'idle',
+  newsletterErrors: [],
+  newsletterLoadedAt: '',
+  newsletterSearch: '',
+  newsletterSource: 'all',
+  newsletterCategory: 'Todos',
+  newsletterSort: 'recent',
   teacherReferenceTitle: '',
   teacherReferenceDescription: '',
   teacherReferenceUrl: '',
@@ -1562,6 +1576,14 @@ auth.onAuthStateChanged(async (user) => {
       state.academicStatus = 'idle';
       state.studyReferences = [];
       state.referencesStatus = 'idle';
+      state.newsletterItems = [];
+      state.newsletterStatus = 'idle';
+      state.newsletterErrors = [];
+      state.newsletterLoadedAt = '';
+      state.newsletterSearch = '';
+      state.newsletterSource = 'all';
+      state.newsletterCategory = 'Todos';
+      state.newsletterSort = 'recent';
       state.activities = [];
       state.activitiesStatus = 'idle';
       state.activitiesMessage = '';
@@ -1961,6 +1983,7 @@ function addXP(amount) {
 // --- Application Routes ---
 const viewRoutes = {
   hub: '#/',
+  newsletter: '#/newsletter',
   'english-master': '#/english-master',
   'student-registration': '#/cadastro-do-aluno',
   'student-references': '#/referencias-de-estudo',
@@ -2044,13 +2067,18 @@ function isEnglishMasterView() {
 
 function applyViewTheme() {
   const englishMasterActive = isEnglishMasterView();
-  document.body.dataset.module = englishMasterActive ? 'english-master' : 'hub';
-  document.title = englishMasterActive ? 'English Master | Magister Hub' : 'Magister Hub';
+  const newsletterActive = state.currentView === 'newsletter';
+  document.body.dataset.module = englishMasterActive ? 'english-master' : (newsletterActive ? 'newsletter' : 'hub');
+  document.title = englishMasterActive
+    ? 'English Master | Magister Hub'
+    : (newsletterActive ? 'Newsletter Dev | Magister Hub' : 'Magister Hub');
   const subtitle = document.querySelector('header > p');
   if (subtitle) {
     subtitle.textContent = englishMasterActive
       ? 'English Master · Aprendizado interativo de inglês'
-      : 'Magister Hub · Seu hub de ferramentas educacionais';
+      : (newsletterActive
+        ? 'Newsletter Dev · Curadoria das comunidades de tecnologia'
+        : 'Magister Hub · Seu hub de ferramentas educacionais');
   }
 }
 
@@ -2063,6 +2091,7 @@ function renderApp() {
 
   updateHeader();
   if (state.currentView === 'hub') renderHubHome();
+  else if (state.currentView === 'newsletter') renderNewsletter();
   else if (state.currentView === 'english-master') renderEnglishMaster();
   else if (state.currentView === 'student-registration' && !isAdmin()) renderStudentRegistration();
   else if (state.currentView === 'student-references' && !isAdmin()) renderStudentReferences();
@@ -2142,6 +2171,7 @@ function updateHeader() {
 
     <nav class="app-nav" aria-label="Navegação principal">
       <button class="nav-btn ${state.currentView === 'hub' ? 'active' : ''}" onclick="window.navigateTo('hub')">Hub</button>
+      <button class="nav-btn ${state.currentView === 'newsletter' ? 'active' : ''}" onclick="window.navigateTo('newsletter')">Newsletter</button>
       <button class="nav-btn ${isEnglishMasterView() ? 'active' : ''}" onclick="window.navigateTo('english-master')">English Master</button>
       <a class="nav-btn external-nav-btn" href="https://codeescape-c9e1b.web.app/" target="_blank" rel="noopener noreferrer" aria-label="Abrir CodeScape em uma nova guia">CodeScape <span aria-hidden="true">↗</span></a>
     </nav>
@@ -2155,6 +2185,219 @@ function updateHeader() {
     </div>
   `;
 }
+
+function formatNewsletterDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return 'Data não informada';
+  return new Intl.DateTimeFormat('pt-BR', { day: '2-digit', month: 'short', year: 'numeric' }).format(date);
+}
+
+function renderNewsletterSourceCards() {
+  return NEWSLETTER_SOURCES.map(source => `
+    <a class="newsletter-source-card source-${source.id}" href="${escapeHtml(getSafeExternalUrl(source.url))}" target="_blank" rel="noopener noreferrer">
+      <span class="newsletter-source-mark" aria-hidden="true">${source.id === 'devto' ? 'DEV' : (source.id === 'hackernews' ? 'Y' : 'SO')}</span>
+      <span><small>${escapeHtml(source.kind)}</small><strong>${escapeHtml(source.name)}</strong><em>${escapeHtml(source.description)}</em></span>
+      <span class="newsletter-external-mark" aria-hidden="true">↗</span>
+    </a>
+  `).join('');
+}
+
+function renderNewsletterStoryCard(item) {
+  const safeUrl = getSafeExternalUrl(item.url);
+  const tags = (item.tags || []).slice(0, 3);
+  const answerLabel = item.sourceId === 'stackoverflow' ? 'respostas' : 'comentários';
+  return `
+    <article class="newsletter-story-card">
+      <div class="newsletter-story-topline">
+        <span class="newsletter-source-badge source-${escapeHtml(item.sourceId)}">${escapeHtml(item.sourceName)}</span>
+        <span class="newsletter-category-badge">${escapeHtml(item.category)}</span>
+      </div>
+      <div class="newsletter-story-copy">
+        <h3><a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.title)}</a></h3>
+        <p>${escapeHtml(item.summary)}</p>
+      </div>
+      ${tags.length ? `<div class="newsletter-tags">${tags.map(tag => `<span>#${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
+      <div class="newsletter-story-meta">
+        <span>Por ${escapeHtml(item.author)}</span>
+        <span>${formatNewsletterDate(item.publishedAt)}</span>
+      </div>
+      <div class="newsletter-story-footer">
+        <span title="Engajamento da comunidade">▲ ${item.score} · ◌ ${item.comments} ${answerLabel}</span>
+        <a href="${escapeHtml(safeUrl)}" target="_blank" rel="noopener noreferrer" aria-label="Ler ${escapeHtml(item.title)} em ${escapeHtml(item.sourceName)}">Ler na fonte <span aria-hidden="true">↗</span></a>
+      </div>
+    </article>
+  `;
+}
+
+function getFilteredNewsletterItems() {
+  return filterNewsletterItems(state.newsletterItems, {
+    search: state.newsletterSearch,
+    source: state.newsletterSource,
+    category: state.newsletterCategory,
+    sort: state.newsletterSort
+  });
+}
+
+function renderNewsletterResultsRegion() {
+  if (state.newsletterStatus === 'loading') {
+    return `
+      <div class="newsletter-result-summary" role="status">Buscando novidades nas comunidades...</div>
+      <div class="newsletter-grid newsletter-loading-grid" aria-hidden="true">
+        ${Array.from({ length: 6 }, () => '<div class="newsletter-story-skeleton"><span></span><strong></strong><em></em><em></em></div>').join('')}
+      </div>
+    `;
+  }
+
+  const items = getFilteredNewsletterItems();
+  const unavailableSources = state.newsletterErrors.map(error => error.sourceName);
+  const partialWarning = unavailableSources.length && state.newsletterItems.length
+    ? `<div class="newsletter-feed-alert warning" role="status"><strong>Feed parcial.</strong> ${escapeHtml(unavailableSources.join(', '))} ${unavailableSources.length === 1 ? 'não respondeu' : 'não responderam'} desta vez. As demais fontes continuam disponíveis.</div>`
+    : '';
+
+  if (!state.newsletterItems.length) {
+    return `
+      <div class="newsletter-feed-alert error" role="alert">
+        <strong>Não foi possível atualizar o feed agora.</strong>
+        <span>Você ainda pode acessar diretamente as comunidades abaixo ou tentar novamente.</span>
+        <button type="button" onclick="window.refreshNewsletter()">Tentar novamente</button>
+      </div>
+      <div class="newsletter-direct-links">
+        ${NEWSLETTER_SOURCES.map(source => `<a href="${escapeHtml(getSafeExternalUrl(source.url))}" target="_blank" rel="noopener noreferrer">Abrir ${escapeHtml(source.name)} ↗</a>`).join('')}
+      </div>
+    `;
+  }
+
+  const updatedLabel = state.newsletterLoadedAt
+    ? `Atualizado em ${new Intl.DateTimeFormat('pt-BR', { hour: '2-digit', minute: '2-digit' }).format(new Date(state.newsletterLoadedAt))}`
+    : '';
+  return `
+    ${partialWarning}
+    <div class="newsletter-result-summary" role="status">
+      <span><strong>${items.length}</strong> ${items.length === 1 ? 'publicação encontrada' : 'publicações encontradas'}</span>
+      <small>${escapeHtml(updatedLabel)}</small>
+    </div>
+    ${items.length
+      ? `<div class="newsletter-grid">${items.map(renderNewsletterStoryCard).join('')}</div>`
+      : `<div class="newsletter-empty"><span aria-hidden="true">⌕</span><h3>Nenhuma publicação encontrada</h3><p>Altere a busca ou os filtros para explorar outros assuntos.</p><button type="button" onclick="window.clearNewsletterFilters()">Limpar filtros</button></div>`}
+  `;
+}
+
+function updateNewsletterResultsRegion() {
+  const region = document.querySelector('.newsletter-results-region');
+  if (region) region.innerHTML = renderNewsletterResultsRegion();
+}
+
+async function loadNewsletterFeed() {
+  state.newsletterStatus = 'loading';
+  state.newsletterErrors = [];
+  updateNewsletterResultsRegion();
+  try {
+    const result = await loadDeveloperNews();
+    state.newsletterItems = result.items;
+    state.newsletterErrors = result.errors;
+    state.newsletterLoadedAt = result.loadedAt;
+    state.newsletterStatus = result.items.length ? 'ready' : 'error';
+  } catch (error) {
+    console.warn('Não foi possível carregar a Newsletter:', error);
+    state.newsletterItems = [];
+    state.newsletterErrors = NEWSLETTER_SOURCES.map(source => ({ sourceId: source.id, sourceName: source.name }));
+    state.newsletterStatus = 'error';
+  }
+  if (state.currentView === 'newsletter') updateNewsletterResultsRegion();
+}
+
+function renderNewsletter() {
+  const mainContent = document.getElementById('main-content');
+  const sourceButtons = [
+    { id: 'all', name: 'Todas' },
+    ...NEWSLETTER_SOURCES.map(source => ({ id: source.id, name: source.name }))
+  ];
+  mainContent.innerHTML = `
+    <section class="newsletter-page">
+      <div class="newsletter-hero">
+        <div class="newsletter-hero-copy">
+          <span class="newsletter-kicker">NEWSLETTER DEV</span>
+          <h1>O que a comunidade está discutindo agora.</h1>
+          <p>Uma curadoria automática de artigos, notícias e perguntas para quem desenvolve software — direto de comunidades e fóruns especializados.</p>
+          <div class="newsletter-trust-line"><span aria-hidden="true">✓</span> Links sempre abrem na publicação original</div>
+        </div>
+        <div class="newsletter-code-window" aria-hidden="true">
+          <div><i></i><i></i><i></i><small>community-feed.js</small></div>
+          <code><span>const</span> dailyRead = [</code>
+          <code>&nbsp; <b>'learn'</b>, <b>'build'</b>,</code>
+          <code>&nbsp; <b>'share'</b>, <b>'repeat'</b></code>
+          <code>];</code>
+          <strong>24<span>/</span>7</strong>
+        </div>
+      </div>
+
+      <div class="newsletter-section-heading">
+        <div><span>FONTES SELECIONADAS</span><h2>Conteúdo de quem vive tecnologia</h2></div>
+        <small>Comunidades independentes · conteúdo externo</small>
+      </div>
+      <div class="newsletter-sources-grid">${renderNewsletterSourceCards()}</div>
+
+      <div class="newsletter-feed-heading">
+        <div><span>RADAR TECH</span><h2>Últimas da comunidade</h2></div>
+        <button class="newsletter-refresh-btn" type="button" onclick="window.refreshNewsletter()" ${state.newsletterStatus === 'loading' ? 'disabled' : ''}>
+          <span aria-hidden="true">↻</span> Atualizar feed
+        </button>
+      </div>
+
+      <div class="newsletter-controls">
+        <label class="newsletter-search">
+          <span aria-hidden="true">⌕</span>
+          <span class="sr-only">Buscar publicações</span>
+          <input type="search" maxlength="80" value="${escapeHtml(state.newsletterSearch)}" oninput="window.updateNewsletterSearch(this.value)" placeholder="Busque por tema, tecnologia ou autor..." />
+        </label>
+        <label class="newsletter-select-control">
+          <span>Categoria</span>
+          <select onchange="window.setNewsletterFilter('category', this.value)">
+            ${NEWSLETTER_CATEGORIES.map(category => `<option value="${escapeHtml(category)}" ${state.newsletterCategory === category ? 'selected' : ''}>${escapeHtml(category)}</option>`).join('')}
+          </select>
+        </label>
+        <label class="newsletter-select-control">
+          <span>Ordenar</span>
+          <select onchange="window.setNewsletterFilter('sort', this.value)">
+            <option value="recent" ${state.newsletterSort === 'recent' ? 'selected' : ''}>Mais recentes</option>
+            <option value="popular" ${state.newsletterSort === 'popular' ? 'selected' : ''}>Mais relevantes</option>
+          </select>
+        </label>
+      </div>
+      <div class="newsletter-source-filters" aria-label="Filtrar por fonte">
+        ${sourceButtons.map(source => `<button type="button" class="${state.newsletterSource === source.id ? 'active' : ''}" aria-pressed="${state.newsletterSource === source.id}" onclick="window.setNewsletterFilter('source', '${source.id}')">${escapeHtml(source.name)}</button>`).join('')}
+      </div>
+
+      <div class="newsletter-results-region">${renderNewsletterResultsRegion()}</div>
+    </section>
+  `;
+
+  if (state.newsletterStatus === 'idle') queueMicrotask(loadNewsletterFeed);
+}
+
+window.updateNewsletterSearch = value => {
+  state.newsletterSearch = String(value || '').slice(0, 80);
+  updateNewsletterResultsRegion();
+};
+
+window.setNewsletterFilter = (kind, value) => {
+  if (kind === 'source' && ['all', ...NEWSLETTER_SOURCES.map(source => source.id)].includes(value)) state.newsletterSource = value;
+  if (kind === 'category' && NEWSLETTER_CATEGORIES.includes(value)) state.newsletterCategory = value;
+  if (kind === 'sort' && ['recent', 'popular'].includes(value)) state.newsletterSort = value;
+  renderNewsletter();
+};
+
+window.clearNewsletterFilters = () => {
+  state.newsletterSearch = '';
+  state.newsletterSource = 'all';
+  state.newsletterCategory = 'Todos';
+  state.newsletterSort = 'recent';
+  renderNewsletter();
+};
+
+window.refreshNewsletter = () => {
+  if (state.newsletterStatus !== 'loading') loadNewsletterFeed();
+};
 
 function renderHubModuleCard(module) {
   return `
@@ -2266,7 +2509,15 @@ function renderHubHome() {
           ? 'Carregando as provas da sua turma...'
           : `${activeExamCount} disponível(is) · ${blockedExamCount} bloqueada(s).`
       }
-    ])
+    ]),
+    {
+      view: 'newsletter',
+      icon: '⌘',
+      kicker: 'Comunidades tech',
+      title: 'Newsletter para devs',
+      description: 'Notícias, discussões e perguntas em destaque no DEV Community, Hacker News e Stack Overflow.',
+      featured: true
+    }
   ];
 
   mainContent.innerHTML = `
