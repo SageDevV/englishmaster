@@ -1992,6 +1992,7 @@ const viewRoutes = {
   'teacher-academics': '#/professor/turmas-e-materias',
   'teacher-students': '#/professor/alunos-por-turma',
   'teacher-references': '#/professor/referencias-de-estudo',
+  'teacher-activity-create': '#/professor/cadastro-de-atividade',
   'teacher-activities': '#/professor/atividades',
   'teacher-create': '#/professor/criacao-de-prova',
   'teacher-exams': '#/professor/provas-cadastradas',
@@ -2007,6 +2008,7 @@ function getAuthorizedViewFromHash() {
     || requestedView === 'teacher-academics'
     || requestedView === 'teacher-students'
     || requestedView === 'teacher-references'
+    || requestedView === 'teacher-activity-create'
     || requestedView === 'teacher-activities';
   const studentOnly = requestedView === 'exam'
     || requestedView === 'student-registration'
@@ -2035,7 +2037,7 @@ window.navigateTo = view => {
     state.referencesStatus = 'idle';
     state.referencesMessage = '';
   }
-  if (view === 'teacher-activities' || view === 'student-activities') {
+  if (view === 'teacher-activity-create' || view === 'teacher-activities' || view === 'student-activities') {
     state.activitiesStatus = 'idle';
     state.activitiesMessage = '';
     state.activityUploads = {};
@@ -2101,6 +2103,7 @@ function renderApp() {
   else if (state.currentView === 'teacher-academics' && isAdmin()) renderTeacherAcademics();
   else if (state.currentView === 'teacher-students' && isAdmin()) renderTeacherStudents();
   else if (state.currentView === 'teacher-references' && isAdmin()) renderTeacherReferences();
+  else if (state.currentView === 'teacher-activity-create' && isAdmin()) renderTeacherActivityCreator();
   else if (state.currentView === 'teacher-activities' && isAdmin()) renderTeacherActivities();
   else if (state.currentView === 'teacher-create' && isAdmin()) renderTeacherExamCreator();
   else if (state.currentView === 'teacher-exams' && isAdmin()) renderTeacherExamManager();
@@ -2449,11 +2452,18 @@ function renderHubHome() {
         description: 'Publique links e conteúdos de apoio para cada turma e matéria.'
       },
       {
+        view: 'teacher-activity-create',
+        icon: '＋',
+        kicker: 'Entregas em ZIP',
+        title: 'Cadastrar atividade',
+        description: 'Publique uma nova atividade com orientações por turma e matéria.'
+      },
+      {
         view: 'teacher-activities',
         icon: '⇧',
-        kicker: 'Entregas em ZIP',
-        title: 'Atividades',
-        description: 'Cadastre atividades por turma e matéria e acompanhe as entregas.'
+        kicker: 'Gestão de atividades',
+        title: 'Atividades cadastradas',
+        description: 'Visualize atividades, acompanhe entregas e arquive publicações.'
       },
       {
         view: 'teacher-create',
@@ -2620,22 +2630,14 @@ function renderActivitySubmissionRows(submissions) {
   `).join('')}</div>`;
 }
 
-function renderTeacherActivities() {
+function renderTeacherActivityCreator() {
   const mainContent = document.getElementById('main-content');
-  if (state.activitiesStatus === 'idle') {
-    state.activitiesStatus = 'loading';
-    queueMicrotask(async () => {
-      await loadActivities();
-      if (state.currentView === 'teacher-activities') renderTeacherActivities();
-    });
-  }
   const subjects = getSubjectsForClass(state.academicSubjects, state.teacherActivityClassId);
   const canCreate = subjects.length > 0;
-  const activeActivityCount = state.activities.filter(activity => activity.active && !activity.deleted).length;
   mainContent.innerHTML = `
-    <section class="exam-page activities-management-page">
+    <section class="exam-page activities-management-page activity-creation-page">
       <div class="exam-page-heading">
-        <div><span class="eyebrow">Entregas em ZIP</span><h2>Cadastro de atividades</h2><p>Publique orientações por turma e matéria e acompanhe os arquivos encaminhados.</p></div>
+        <div><span class="eyebrow">Entregas em ZIP</span><h2>Cadastrar atividade</h2><p>Publique uma nova atividade com orientações direcionadas por turma e matéria.</p></div>
         <button class="secondary-btn" onclick="window.navigateTo('hub')">Voltar ao Hub</button>
       </div>
       ${state.activitiesMessage ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
@@ -2647,20 +2649,45 @@ function renderTeacherActivities() {
         <label class="exam-field activity-instructions-field"><span>Orientações</span><textarea name="instructions" maxlength="5000" rows="6" required oninput="window.updateActivityDraft('instructions', this.value)" placeholder="Descreva o que deve ser entregue e como preparar o arquivo ZIP">${escapeHtml(state.teacherActivityInstructions)}</textarea></label>
         <button class="next-btn" type="submit" ${canCreate ? '' : 'disabled'}>Cadastrar atividade</button>
       </form>
-      <div class="hub-section-heading"><div><span>Publicadas</span><h2>Atividades cadastradas</h2></div><small>${activeActivityCount} ativa(s) · ${state.activities.length} total</small></div>
-      ${state.activitiesStatus === 'loading'
-        ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando atividades...</p></div>'
-        : state.activities.length
-          ? `<div class="teacher-activity-list">${state.activities.map(activity => `
-              <article class="teacher-activity-card ${activity.deleted ? 'archived' : ''}">
-                <div class="activity-card-topline"><span>${escapeHtml(activity.subjectName)}</span><small>${escapeHtml(activity.className)} · ${activity.deleted ? 'Arquivada' : 'Ativa'}</small></div>
-                <h3>${escapeHtml(activity.title)}</h3>
-                <p>${escapeHtml(activity.instructions)}</p>
-                <div class="activity-card-actions"><strong>${activity.submissions.length} entrega(s)</strong>${activity.deleted ? '<span class="activity-archived-label">Somente consulta</span>' : `<button type="button" class="delete-exam-btn" onclick="window.archiveActivity('${activity.id}')">Arquivar</button>`}</div>
-                ${renderActivitySubmissionRows(activity.submissions)}
-              </article>
-            `).join('')}</div>`
-          : '<div class="exam-empty"><div class="empty-icon">⇧</div><h3>Nenhuma atividade cadastrada</h3><p>Use o formulário acima para publicar a primeira atividade.</p></div>'}
+    </section>
+  `;
+}
+
+function renderTeacherActivities() {
+  const mainContent = document.getElementById('main-content');
+  if (state.activitiesStatus === 'idle') {
+    state.activitiesStatus = 'loading';
+    queueMicrotask(async () => {
+      await loadActivities();
+      if (state.currentView === 'teacher-activities') renderTeacherActivities();
+    });
+  }
+  const activeActivityCount = state.activities.filter(activity => activity.active && !activity.deleted).length;
+  const content = state.activitiesStatus === 'loading'
+    ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando atividades...</p></div>'
+    : state.activitiesStatus === 'error'
+      ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.activitiesMessage)}</p><button class="next-btn" onclick="window.refreshActivities()">Tentar novamente</button></div>`
+      : state.activities.length
+        ? `<div class="teacher-activity-list">${state.activities.map(activity => `
+            <article class="teacher-activity-card ${activity.deleted ? 'archived' : ''}">
+              <div class="activity-card-topline"><span>${escapeHtml(activity.subjectName)}</span><small>${escapeHtml(activity.className)} · ${activity.deleted ? 'Arquivada' : 'Ativa'}</small></div>
+              <h3>${escapeHtml(activity.title)}</h3>
+              <p>${escapeHtml(activity.instructions)}</p>
+              <div class="activity-card-actions"><strong>${activity.submissions.length} entrega(s)</strong>${activity.deleted ? '<span class="activity-archived-label">Somente consulta</span>' : `<button type="button" class="delete-exam-btn" onclick="window.archiveActivity('${activity.id}')">Arquivar</button>`}</div>
+              ${renderActivitySubmissionRows(activity.submissions)}
+            </article>
+          `).join('')}</div>`
+        : '<div class="exam-empty"><div class="empty-icon">⇧</div><h3>Nenhuma atividade cadastrada</h3><p>Cadastre a primeira atividade para disponibilizá-la aos alunos.</p><button class="next-btn" onclick="window.navigateTo(\'teacher-activity-create\')">Cadastrar atividade</button></div>';
+
+  mainContent.innerHTML = `
+    <section class="exam-page activities-management-page">
+      <div class="exam-page-heading results-heading">
+        <div><span class="eyebrow">Área do professor</span><h2>Atividades cadastradas</h2><p>Visualize atividades, acompanhe as entregas em ZIP e arquive publicações.</p></div>
+        <button class="secondary-btn" onclick="window.refreshActivities()">Atualizar lista</button>
+      </div>
+      ${state.activitiesMessage && state.activitiesStatus !== 'error' ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
+      <div class="hub-section-heading"><div><span>Publicadas</span><h2>Visão geral</h2></div><small>${activeActivityCount} ativa(s) · ${state.activities.length} total</small></div>
+      ${content}
     </section>
   `;
 }
@@ -4707,7 +4734,7 @@ window.updateActivityDraft = (field, value) => {
     if (!subjects.some(subject => subject.id === state.teacherActivitySubjectId)) {
       state.teacherActivitySubjectId = '';
     }
-    renderTeacherActivities();
+    renderTeacherActivityCreator();
   }
 };
 
@@ -4725,12 +4752,12 @@ window.submitActivity = async event => {
     });
     state.teacherActivityTitle = '';
     state.teacherActivityInstructions = '';
+    state.activitiesStatus = 'idle';
     state.activitiesMessage = 'Atividade cadastrada com sucesso.';
-    await loadActivities();
   } catch (error) {
     state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível cadastrar a atividade.')}`;
   }
-  renderTeacherActivities();
+  renderTeacherActivityCreator();
 };
 
 window.archiveActivity = async activityId => {
