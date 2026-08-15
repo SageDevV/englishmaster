@@ -2509,15 +2509,7 @@ function renderHubHome() {
           ? 'Carregando as provas da sua turma...'
           : `${activeExamCount} disponível(is) · ${blockedExamCount} bloqueada(s).`
       }
-    ]),
-    {
-      view: 'newsletter',
-      icon: '⌘',
-      kicker: 'Comunidades tech',
-      title: 'Newsletter para devs',
-      description: 'Notícias, discussões e perguntas em destaque no DEV Community, Hacker News e Stack Overflow.',
-      featured: true
-    }
+    ])
   ];
 
   mainContent.innerHTML = `
