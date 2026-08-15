@@ -68,8 +68,10 @@ import {
   NEWSLETTER_SOURCES
 } from './src/services/newsletterServices.js';
 import {
+  buildTeacherPerformanceDashboard,
   buildTeacherStudentGroups,
   filterTeacherResults,
+  getTeacherPerformanceFilterOptions,
   getTeacherResultFilterOptions
 } from './src/services/teacherDashboardServices.js';
 
@@ -1531,6 +1533,12 @@ const state = {
   teacherStudents: [],
   teacherStudentsStatus: 'idle',
   teacherStudentsMessage: '',
+  teacherPerformanceStatus: 'idle',
+  teacherPerformanceMessage: '',
+  teacherPerformanceFilters: {
+    classKey: '',
+    subjectKey: ''
+  },
   teacherExams: [],
   teacherExamsStatus: 'idle',
   teacherExamsMessage: '',
@@ -1591,6 +1599,9 @@ auth.onAuthStateChanged(async (user) => {
       state.teacherStudents = [];
       state.teacherStudentsStatus = 'idle';
       state.teacherStudentsMessage = '';
+      state.teacherPerformanceStatus = 'idle';
+      state.teacherPerformanceMessage = '';
+      state.teacherPerformanceFilters = { classKey: '', subjectKey: '' };
       state.examResults = [];
       state.examResultsStatus = 'idle';
       state.examResultFilters = { classKey: '', subjectKey: '', studentKey: '' };
@@ -1991,6 +2002,7 @@ const viewRoutes = {
   exam: '#/prova',
   'teacher-academics': '#/professor/turmas-e-materias',
   'teacher-students': '#/professor/alunos-por-turma',
+  'teacher-performance': '#/professor/dashboard-desempenho',
   'teacher-references': '#/professor/referencias-de-estudo',
   'teacher-activity-create': '#/professor/cadastro-de-atividade',
   'teacher-activities': '#/professor/atividades',
@@ -2007,6 +2019,7 @@ function getAuthorizedViewFromHash() {
     || requestedView === 'teacher-results'
     || requestedView === 'teacher-academics'
     || requestedView === 'teacher-students'
+    || requestedView === 'teacher-performance'
     || requestedView === 'teacher-references'
     || requestedView === 'teacher-activity-create'
     || requestedView === 'teacher-activities';
@@ -2032,6 +2045,10 @@ window.navigateTo = view => {
   }
   if (view === 'teacher-exams') state.teacherExamsStatus = 'idle';
   if (view === 'teacher-students') state.teacherStudentsStatus = 'idle';
+  if (view === 'teacher-performance') {
+    state.teacherPerformanceStatus = 'idle';
+    state.teacherPerformanceMessage = '';
+  }
   if (view === 'teacher-results') state.examResultsStatus = 'idle';
   if (view === 'teacher-references' || view === 'student-references') {
     state.referencesStatus = 'idle';
@@ -2102,6 +2119,7 @@ function renderApp() {
   else if (state.currentView === 'exam' && !isAdmin()) renderExamPortal();
   else if (state.currentView === 'teacher-academics' && isAdmin()) renderTeacherAcademics();
   else if (state.currentView === 'teacher-students' && isAdmin()) renderTeacherStudents();
+  else if (state.currentView === 'teacher-performance' && isAdmin()) renderTeacherPerformanceDashboard();
   else if (state.currentView === 'teacher-references' && isAdmin()) renderTeacherReferences();
   else if (state.currentView === 'teacher-activity-create' && isAdmin()) renderTeacherActivityCreator();
   else if (state.currentView === 'teacher-activities' && isAdmin()) renderTeacherActivities();
@@ -2443,6 +2461,13 @@ function renderHubHome() {
         kicker: 'Perfis dos alunos',
         title: 'Alunos por turma',
         description: 'Consulte os dados preenchidos pelos alunos, organizados por turma.'
+      },
+      {
+        view: 'teacher-performance',
+        icon: '⌁',
+        kicker: 'Análise pedagógica',
+        title: 'Dashboard de desempenho',
+        description: 'Acompanhe evolução, médias, erros recorrentes, pendências e avaliações.'
       },
       {
         view: 'teacher-references',
@@ -3418,6 +3443,228 @@ async function loadTeacherStudents() {
   }
   if (state.currentView === 'teacher-students') renderTeacherStudents();
 }
+
+function renderPerformanceEmpty(title, description) {
+  return `<div class="performance-empty"><strong>${escapeHtml(title)}</strong><p>${escapeHtml(description)}</p></div>`;
+}
+
+function renderStudentEvolutionSection(items) {
+  if (!items.length) return renderPerformanceEmpty('Sem evolução disponível', 'São necessárias avaliações concluídas para montar a evolução dos alunos.');
+  return `<div class="performance-evolution-grid">${items.map(student => {
+    const recentResults = student.results.slice(-8);
+    const deltaLabel = `${student.delta > 0 ? '+' : ''}${student.delta} p.p.`;
+    return `
+      <article class="performance-evolution-card">
+        <div class="performance-card-heading">
+          <div><strong>${escapeHtml(student.studentName)}</strong><small>${escapeHtml(student.className)}</small></div>
+          <span class="performance-trend ${student.trend}">${student.trend === 'up' ? '↑' : student.trend === 'down' ? '↓' : '→'} ${deltaLabel}</span>
+        </div>
+        <div class="performance-sparkline" aria-label="Evolução de ${escapeHtml(student.studentName)}">
+          ${recentResults.map(result => `<span style="height:${Math.max(6, result.percentage)}%" title="${escapeHtml(result.examTitle)}: ${result.percentage}%"></span>`).join('')}
+        </div>
+        <div class="performance-card-footer"><span>Primeira <strong>${student.firstPercentage}%</strong></span><span>Atual <strong>${student.latestPercentage}%</strong></span><span>Média <strong>${student.average}%</strong></span></div>
+      </article>
+    `;
+  }).join('')}</div>`;
+}
+
+function renderClassSubjectAverages(items) {
+  if (!items.length) return renderPerformanceEmpty('Sem médias calculáveis', 'As médias aparecerão quando houver notas definitivas para as turmas e matérias selecionadas.');
+  return `<div class="performance-ranking-list">${items.map(item => `
+    <article class="performance-ranking-row">
+      <div class="performance-ranking-copy"><strong>${escapeHtml(item.subjectName)}</strong><small>${escapeHtml(item.className)} · ${item.attempts} ${item.attempts === 1 ? 'resultado' : 'resultados'}</small></div>
+      <div class="performance-progress"><span style="width:${item.average}%"></span></div>
+      <strong class="performance-value">${item.average}%</strong>
+    </article>
+  `).join('')}</div>`;
+}
+
+function renderErrorTopics(items) {
+  if (!items.length) return renderPerformanceEmpty('Nenhum erro contabilizado', 'Questões objetivas e dissertativas finalizadas com erros aparecerão nesta seção.');
+  return `<div class="performance-error-list">${items.map((item, index) => `
+    <article class="performance-error-row">
+      <span class="performance-rank">${index + 1}</span>
+      <div><strong>${escapeHtml(item.prompt)}</strong><small>${escapeHtml(item.examTitle)} · ${escapeHtml(item.subjectName)} · ${item.wrongAnswers}/${item.totalAnswers} respostas incorretas</small></div>
+      <span class="performance-error-rate">${item.errorRate}%</span>
+    </article>
+  `).join('')}</div>`;
+}
+
+function renderPendingActivities(items) {
+  if (!items.length) return renderPerformanceEmpty('Nenhuma atividade ativa', 'As pendências aparecerão quando existirem atividades publicadas para as turmas selecionadas.');
+  return `<div class="performance-pending-grid">${items.map(activity => {
+    const pendingNames = activity.pendingStudents.slice(0, 4);
+    const remaining = activity.pendingStudents.length - pendingNames.length;
+    return `
+      <article class="performance-pending-card ${activity.pendingCount ? 'has-pending' : 'complete'}">
+        <div class="performance-card-heading"><span>${escapeHtml(activity.subjectName)}</span><strong>${activity.pendingCount} pendente(s)</strong></div>
+        <h3>${escapeHtml(activity.title)}</h3>
+        <p>${escapeHtml(activity.className)} · ${activity.deliveredCount}/${activity.expectedCount} entregas</p>
+        ${activity.expectedCount === 0
+          ? '<small>Nenhum aluno cadastrado nesta turma.</small>'
+          : activity.pendingCount
+            ? `<div class="performance-pending-names">${pendingNames.map(name => `<span>${escapeHtml(name)}</span>`).join('')}${remaining > 0 ? `<span>+${remaining} aluno(s)</span>` : ''}</div>`
+            : '<div class="performance-complete-label">✓ Todos entregaram</div>'}
+      </article>
+    `;
+  }).join('')}</div>`;
+}
+
+function renderExamComparison(items) {
+  if (!items.length) return renderPerformanceEmpty('Sem avaliações para comparar', 'As provas com notas calculáveis aparecerão em ordem cronológica.');
+  return `<div class="performance-exam-comparison">${items.map((exam, index) => `
+    <article class="performance-exam-card">
+      <div class="performance-exam-order">${index + 1}</div>
+      <div><strong>${escapeHtml(exam.examTitle)}</strong><small>${escapeHtml(exam.className)} · ${escapeHtml(exam.subjectName)}</small></div>
+      <div class="performance-exam-score"><strong>${exam.average}%</strong><small>${exam.attempts} ${exam.attempts === 1 ? 'resultado' : 'resultados'}</small></div>
+    </article>
+  `).join('')}</div>`;
+}
+
+function renderTeacherPerformanceFilters() {
+  const options = getTeacherPerformanceFilterOptions(
+    state.examResults,
+    state.activities,
+    state.teacherPerformanceFilters
+  );
+  const hasFilters = Object.values(state.teacherPerformanceFilters).some(Boolean);
+  return `
+    <div class="performance-filters">
+      <label class="exam-field"><span>Turma</span><select onchange="window.updateTeacherPerformanceFilter('classKey', this.value)">${renderTeacherResultFilterOptions(options.classes, state.teacherPerformanceFilters.classKey, 'Todas as turmas')}</select></label>
+      <label class="exam-field"><span>Matéria</span><select onchange="window.updateTeacherPerformanceFilter('subjectKey', this.value)">${renderTeacherResultFilterOptions(options.subjects, state.teacherPerformanceFilters.subjectKey, 'Todas as matérias')}</select></label>
+      <button type="button" class="secondary-btn" onclick="window.clearTeacherPerformanceFilters()" ${hasFilters ? '' : 'disabled'}>Limpar filtros</button>
+    </div>
+  `;
+}
+
+function renderTeacherPerformanceDashboard() {
+  const mainContent = document.getElementById('main-content');
+  if (state.teacherPerformanceStatus === 'idle') {
+    state.teacherPerformanceStatus = 'loading';
+    queueMicrotask(loadTeacherPerformanceDashboard);
+  }
+
+  if (state.teacherPerformanceStatus === 'loading') {
+    mainContent.innerHTML = `
+      <section class="exam-page teacher-performance-page">
+        <div class="exam-page-heading results-heading"><div><span class="eyebrow">Análise pedagógica</span><h2>Dashboard de desempenho</h2><p>Consolidando resultados, alunos e entregas...</p></div></div>
+        <div class="performance-metrics-grid">${Array.from({ length: 4 }, () => '<div class="performance-metric-card skeleton"></div>').join('')}</div>
+        <div class="exam-loading"><div class="loading-spinner"></div><p>Calculando indicadores...</p></div>
+      </section>
+    `;
+    return;
+  }
+
+  if (state.teacherPerformanceStatus === 'error') {
+    mainContent.innerHTML = `
+      <section class="exam-page teacher-performance-page">
+        <div class="exam-page-heading"><div><span class="eyebrow">Análise pedagógica</span><h2>Dashboard de desempenho</h2></div></div>
+        <div class="exam-empty"><h3>Não foi possível carregar o dashboard</h3><p>${escapeHtml(state.teacherPerformanceMessage)}</p><button class="next-btn" onclick="window.refreshTeacherPerformanceDashboard()">Tentar novamente</button></div>
+      </section>
+    `;
+    return;
+  }
+
+  const dashboard = buildTeacherPerformanceDashboard({
+    results: state.examResults,
+    studentRecords: state.teacherStudents,
+    classes: state.academicClasses,
+    activities: state.activities,
+    filters: state.teacherPerformanceFilters
+  });
+  const averageLabel = dashboard.summary.average === null ? '—' : `${dashboard.summary.average}%`;
+  const partialAlert = state.teacherPerformanceStatus === 'partial'
+    ? `<div class="exam-alert error" role="status">${escapeHtml(state.teacherPerformanceMessage)} Os indicadores disponíveis foram calculados com os dados carregados.</div>`
+    : '';
+
+  mainContent.innerHTML = `
+    <section class="exam-page teacher-performance-page">
+      <div class="exam-page-heading results-heading">
+        <div><span class="eyebrow">Análise pedagógica</span><h2>Dashboard de desempenho</h2><p>Acompanhe evolução, médias, dificuldades, pendências e o desempenho entre avaliações.</p></div>
+        <button class="secondary-btn" onclick="window.refreshTeacherPerformanceDashboard()">Atualizar dados</button>
+      </div>
+      ${partialAlert}
+      ${renderTeacherPerformanceFilters()}
+      <div class="performance-metrics-grid">
+        <article class="performance-metric-card accent"><span>Média geral</span><strong>${averageLabel}</strong><small>Notas definitivas no filtro atual</small></article>
+        <article class="performance-metric-card"><span>Alunos avaliados</span><strong>${dashboard.summary.studentsWithResults}</strong><small>Com ao menos uma nota calculável</small></article>
+        <article class="performance-metric-card"><span>Resultados</span><strong>${dashboard.summary.gradedAttempts}</strong><small>Tentativas consideradas nas médias</small></article>
+        <article class="performance-metric-card warning"><span>Entregas pendentes</span><strong>${dashboard.summary.pendingDeliveries}</strong><small>Entre as atividades ativas</small></article>
+      </div>
+
+      <section class="performance-section">
+        <div class="performance-section-heading"><div><span>EVOLUÇÃO POR ALUNO</span><h2>Trajetória de desempenho</h2></div><small>Da primeira à avaliação mais recente</small></div>
+        ${renderStudentEvolutionSection(dashboard.studentEvolution)}
+      </section>
+
+      <div class="performance-two-columns">
+        <section class="performance-section">
+          <div class="performance-section-heading"><div><span>MÉDIAS ACADÊMICAS</span><h2>Turma e matéria</h2></div></div>
+          ${renderClassSubjectAverages(dashboard.classSubjectAverages)}
+        </section>
+        <section class="performance-section">
+          <div class="performance-section-heading"><div><span>MAIOR ÍNDICE DE ERRO</span><h2>Assuntos para revisar</h2></div><small>Por questão avaliada</small></div>
+          ${renderErrorTopics(dashboard.errorTopics)}
+        </section>
+      </div>
+
+      <section class="performance-section">
+        <div class="performance-section-heading"><div><span>ATIVIDADES PENDENTES</span><h2>Acompanhamento de entregas</h2></div><small>Apenas atividades ativas</small></div>
+        ${renderPendingActivities(dashboard.pendingActivities)}
+      </section>
+
+      <section class="performance-section">
+        <div class="performance-section-heading"><div><span>COMPARAÇÃO ENTRE AVALIAÇÕES</span><h2>Média por prova</h2></div><small>Ordem cronológica dos resultados</small></div>
+        ${renderExamComparison(dashboard.examComparison)}
+      </section>
+    </section>
+  `;
+}
+
+async function loadTeacherPerformanceDashboard() {
+  if (!isAdmin()) return;
+  state.teacherPerformanceStatus = 'loading';
+  state.teacherPerformanceMessage = '';
+  state.examResults = [];
+  state.teacherStudents = [];
+  state.activities = [];
+  state.examResultsStatus = 'loading';
+  state.teacherStudentsStatus = 'loading';
+  state.activitiesStatus = 'loading';
+
+  await Promise.all([loadTeacherResults(), loadTeacherStudents(), loadActivities()]);
+  const failedSources = [];
+  if (state.examResultsStatus === 'error') failedSources.push('resultados de provas');
+  if (state.teacherStudentsStatus === 'error') failedSources.push('cadastros de alunos');
+  if (state.activitiesStatus === 'error') failedSources.push('atividades e entregas');
+  state.teacherPerformanceStatus = failedSources.length === 3 ? 'error' : failedSources.length ? 'partial' : 'ready';
+  state.teacherPerformanceMessage = failedSources.length
+    ? `Não foi possível carregar: ${failedSources.join(', ')}.`
+    : '';
+  if (state.currentView === 'teacher-performance') renderTeacherPerformanceDashboard();
+}
+
+window.updateTeacherPerformanceFilter = (field, value) => {
+  if (!['classKey', 'subjectKey'].includes(field)) return;
+  state.teacherPerformanceFilters[field] = String(value || '');
+  if (field === 'classKey') {
+    const options = getTeacherPerformanceFilterOptions(state.examResults, state.activities, state.teacherPerformanceFilters);
+    if (!options.subjects.some(option => option.value === state.teacherPerformanceFilters.subjectKey)) {
+      state.teacherPerformanceFilters.subjectKey = '';
+    }
+  }
+  renderTeacherPerformanceDashboard();
+};
+
+window.clearTeacherPerformanceFilters = () => {
+  state.teacherPerformanceFilters = { classKey: '', subjectKey: '' };
+  renderTeacherPerformanceDashboard();
+};
+
+window.refreshTeacherPerformanceDashboard = () => {
+  state.teacherPerformanceStatus = 'idle';
+  renderTeacherPerformanceDashboard();
+};
 
 function renderTeacherResultFilterOptions(options, selectedValue, emptyLabel) {
   return `<option value="">${escapeHtml(emptyLabel)}</option>${options.map(option => `
