@@ -178,7 +178,7 @@ service cloud.firestore {
     }
 
     function validActivityResourceChunk(activityId, chunkId) {
-      let resource = get(/databases/$(database)/documents/activityResources/$(activityId));
+      let resource = getAfter(/databases/$(database)/documents/activityResources/$(activityId));
       let validChunkId = (chunkId == '0' && request.resource.data.index == 0)
         || (chunkId == '1' && request.resource.data.index == 1)
         || (chunkId == '2' && request.resource.data.index == 2)
@@ -188,7 +188,7 @@ service cloud.firestore {
         || (chunkId == '6' && request.resource.data.index == 6)
         || (chunkId == '7' && request.resource.data.index == 7);
       return resource.data.uploadedBy == request.auth.uid
-        && resource.data.status == 'uploading'
+        && resource.data.status in ['uploading', 'ready']
         && request.resource.data.keys().hasOnly(['index', 'size', 'data', 'updatedAt'])
         && request.resource.data.index is int
         && request.resource.data.index >= 0

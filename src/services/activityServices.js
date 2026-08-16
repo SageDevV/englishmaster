@@ -8,12 +8,12 @@ function normalizeText(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ');
 }
 
-export function validateActivityDueAt(value, now = Date.now()) {
+export function validateActivityDueAt(value, now = Date.now(), allowPast = false) {
   const rawValue = value instanceof Date ? value : String(value ?? '').trim();
   if (!rawValue) throw new Error('Informe a data de entrega da atividade.');
   const dueAtMillis = rawValue instanceof Date ? rawValue.getTime() : new Date(rawValue).getTime();
   if (!Number.isFinite(dueAtMillis)) throw new Error('Informe uma data de entrega válida.');
-  if (dueAtMillis <= Number(now)) throw new Error('A data de entrega deve estar no futuro.');
+  if (!allowPast && dueAtMillis <= Number(now)) throw new Error('A data de entrega deve estar no futuro.');
   return new Date(dueAtMillis).toISOString();
 }
 
@@ -26,7 +26,7 @@ export function canSubmitActivity(activity = {}, now = Date.now()) {
   return activity.active === true && activity.deleted !== true && !isActivityPastDue(activity, now);
 }
 
-export function validateActivity(data = {}, classes = [], subjects = [], now = Date.now()) {
+export function validateActivity(data = {}, classes = [], subjects = [], now = Date.now(), allowPastDueAt = false) {
   const title = normalizeText(data.title);
   if (title.length < 3 || title.length > MAX_ACTIVITY_TITLE_LENGTH) {
     throw new Error(`O título da atividade deve ter entre 3 e ${MAX_ACTIVITY_TITLE_LENGTH} caracteres.`);
@@ -41,7 +41,7 @@ export function validateActivity(data = {}, classes = [], subjects = [], now = D
     title,
     instructions,
     ...academicSelection,
-    dueAt: validateActivityDueAt(data.dueAt, now)
+    dueAt: validateActivityDueAt(data.dueAt, now, allowPastDueAt)
   };
 }
 

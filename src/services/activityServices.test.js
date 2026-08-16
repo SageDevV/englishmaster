@@ -70,9 +70,29 @@ describe('activity validation', () => {
     assert.throws(() => validateActivityDueAt('invalid', now), /válida/);
     assert.throws(() => validateActivityDueAt('2030-01-10T09:59:59.000Z', now), /futuro/);
     assert.equal(validateActivityDueAt('2030-01-10T10:01:00.000Z', now), '2030-01-10T10:01:00.000Z');
+    assert.equal(
+      validateActivityDueAt('2030-01-10T09:00:00.000Z', now, true),
+      '2030-01-10T09:00:00.000Z'
+    );
   });
 });
 
+
+
+describe('activity editing', () => {
+  it('allows preserving or correcting an expired deadline during an edit', () => {
+    const now = new Date('2030-01-10T10:00:00.000Z').getTime();
+    const activity = validateActivity({
+      title: 'Projeto atualizado',
+      instructions: 'Orientações atualizadas.',
+      classId: 'entra21',
+      subjectId: 'subject-1',
+      dueAt: '2030-01-09T18:00:00.000Z'
+    }, DEFAULT_ACADEMIC_CLASSES, subjects, now, true);
+    assert.equal(activity.dueAt, '2030-01-09T18:00:00.000Z');
+    assert.equal(activity.title, 'Projeto atualizado');
+  });
+});
 
 
 describe('activity support resource', () => {

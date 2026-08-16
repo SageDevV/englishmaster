@@ -5988,10 +5988,52 @@ body[data-module="newsletter"] .bg-animate::before {
 .activity-management-actions .delete-exam-btn { margin-left: 0; }
 .activity-management-actions button { white-space: nowrap; }
 
+.activity-editor-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  grid-column: 1 / -1;
+}
+
+.activity-editor-actions .next-btn { width: auto; }
+.editing-activity-resource-field { align-content: start; }
+.editing-resource-selected { align-items: center; }
+.editing-resource-selected .remove-resource-btn {
+  border-color: rgba(248, 113, 113, 0.35);
+  color: #fca5a5;
+}
+
+.activity-resource-removal {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.8rem;
+  border: 1px dashed rgba(248, 113, 113, 0.38);
+  border-radius: 0.75rem;
+  background: rgba(239, 68, 68, 0.055);
+  color: #fecaca;
+  font-size: 0.82rem;
+  font-weight: 800;
+}
+
+.activity-resource-removal button {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 0.55rem;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-main);
+  cursor: pointer;
+}
+
 @media (max-width: 640px) {
   .activity-card-topline,
   .activity-card-actions { align-items: stretch; flex-direction: column; }
   .activity-status-line,
   .activity-management-actions { justify-content: flex-start; }
   .activity-management-actions button { flex: 1 1 auto; }
+  .activity-editor-actions,
+  .activity-resource-removal { align-items: stretch; flex-direction: column; }
+  .activity-editor-actions button,
+  .activity-resource-removal button { width: 100%; }
 }

@@ -713,6 +713,118 @@ async function createActivityOnFreeTier(data, resourceFile = null) {
   }
 }
 
+async function updateActivityOnFreeTier(data, resourceFile = null, removeResource = false) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const activityId = String(data.activityId || '');
+  const activityRef = db.collection('activities').doc(activityId);
+  const resourceRef = db.collection('activityResources').doc(activityId);
+  const [activityDoc, resourceDoc] = await Promise.all([activityRef.get(), resourceRef.get()]);
+  if (!activityDoc.exists || activityDoc.data().deleted === true) {
+    throw new Error('Atividade não encontrada ou já arquivada.');
+  }
+
+  const activity = validateActivity(
+    data,
+    state.academicClasses,
+    state.academicSubjects,
+    Date.now(),
+    true
+  );
+  const existing = serializeActivityDocument(activityDoc);
+  const previousChunkCount = resourceDoc.exists ? Number(resourceDoc.data().chunkCount || 0) : 0;
+  if (existing.resource && !resourceDoc.exists && !resourceFile && !removeResource) {
+    throw new Error('O material de apoio atual não foi encontrado. Substitua ou remova o arquivo para continuar.');
+  }
+
+  let resourceMetadata = existing.resource;
+  let descriptor = null;
+  let chunks = [];
+  let sha256 = '';
+  if (resourceFile) {
+    descriptor = validateActivityResourceFile(resourceFile);
+    const bytes = new Uint8Array(await resourceFile.arrayBuffer());
+    if (!hasZipFileSignature(bytes)) {
+      throw new Error('O conteúdo do novo arquivo de apoio não corresponde a um ZIP válido.');
+    }
+    chunks = splitAttachmentBytes(bytes);
+    sha256 = await hashAttachmentBytes(bytes);
+    resourceMetadata = {
+      fileName: descriptor.name,
+      size: descriptor.size,
+      chunkCount: chunks.length,
+      sha256,
+      status: 'ready'
+    };
+  } else if (removeResource) {
+    resourceMetadata = null;
+  }
+
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  const batch = db.batch();
+  if (resourceFile) {
+    batch.set(resourceRef, {
+      activityId,
+      activityTitle: activity.title,
+      classId: activity.classId,
+      className: activity.className,
+      subjectId: activity.subjectId,
+      subjectName: activity.subjectName,
+      fileName: descriptor.name,
+      contentType: descriptor.contentType,
+      size: descriptor.size,
+      chunkCount: chunks.length,
+      sha256,
+      status: 'ready',
+      uploadedBy: state.user.uid,
+      uploadedAt: serverTimestamp,
+      updatedAt: serverTimestamp
+    });
+    chunks.forEach((chunk, index) => {
+      batch.set(resourceRef.collection('chunks').doc(String(index)), {
+        index,
+        size: chunk.length,
+        data: firebase.firestore.Blob.fromUint8Array(chunk),
+        updatedAt: serverTimestamp
+      });
+    });
+    for (let index = chunks.length; index < previousChunkCount; index++) {
+      batch.delete(resourceRef.collection('chunks').doc(String(index)));
+    }
+  } else if (removeResource) {
+    for (let index = 0; index < previousChunkCount; index++) {
+      batch.delete(resourceRef.collection('chunks').doc(String(index)));
+    }
+    if (resourceDoc.exists) batch.delete(resourceRef);
+  } else if (resourceDoc.exists) {
+    batch.update(resourceRef, {
+      activityTitle: activity.title,
+      classId: activity.classId,
+      className: activity.className,
+      subjectId: activity.subjectId,
+      subjectName: activity.subjectName,
+      updatedAt: serverTimestamp
+    });
+  }
+
+  batch.update(activityRef, {
+    title: activity.title,
+    instructions: activity.instructions,
+    classId: activity.classId,
+    className: activity.className,
+    subjectId: activity.subjectId,
+    subjectName: activity.subjectName,
+    dueAt: firebase.firestore.Timestamp.fromDate(new Date(activity.dueAt)),
+    resource: resourceMetadata,
+    updatedAt: serverTimestamp
+  });
+  await batch.commit();
+  return {
+    ok: true,
+    activityId,
+    resourceAction: resourceFile ? (existing.resource ? 'replaced' : 'added') : removeResource ? 'removed' : 'preserved'
+  };
+}
+
 async function downloadActivityResourceOnFreeTier(activity) {
   if (!activity?.id || !activity.resource) throw new Error('Esta atividade não possui arquivo de apoio.');
   const resourceRef = db.collection('activityResources').doc(activity.id);
@@ -1793,6 +1905,18 @@ const state = {
   teacherActivityResourceProgress: 0,
   teacherActivityResourceType: '',
   teacherActivitySubmitting: false,
+  editingActivityId: null,
+  editingActivityTitle: '',
+  editingActivityInstructions: '',
+  editingActivityDueAt: '',
+  editingActivityClassId: '',
+  editingActivitySubjectId: '',
+  editingActivityResource: null,
+  editingActivityResourceFile: null,
+  editingActivityRemoveResource: false,
+  editingActivityResourceMessage: '',
+  editingActivityResourceType: '',
+  editingActivitySubmitting: false,
   examSaveTimer: null,
   examSubmitting: false,
   examAutoSubmitAttempted: false,
@@ -1893,6 +2017,13 @@ auth.onAuthStateChanged(async (user) => {
       state.teacherActivityResourceProgress = 0;
       state.teacherActivityResourceType = '';
       state.teacherActivitySubmitting = false;
+      state.editingActivityId = null;
+      state.editingActivityResource = null;
+      state.editingActivityResourceFile = null;
+      state.editingActivityRemoveResource = false;
+      state.editingActivityResourceMessage = '';
+      state.editingActivityResourceType = '';
+      state.editingActivitySubmitting = false;
       state.teacherStudents = [];
       state.teacherStudentsStatus = 'idle';
       state.teacherStudentsMessage = '';
@@ -3252,6 +3383,90 @@ function renderActivityDeadline(activity) {
   `;
 }
 
+function resetActivityEditingState() {
+  state.editingActivityId = null;
+  state.editingActivityTitle = '';
+  state.editingActivityInstructions = '';
+  state.editingActivityDueAt = '';
+  state.editingActivityClassId = '';
+  state.editingActivitySubjectId = '';
+  state.editingActivityResource = null;
+  state.editingActivityResourceFile = null;
+  state.editingActivityRemoveResource = false;
+  state.editingActivityResourceMessage = '';
+  state.editingActivityResourceType = '';
+  state.editingActivitySubmitting = false;
+}
+
+function renderTeacherActivityEditor(mainContent) {
+  const subjects = getSubjectsForClass(state.academicSubjects, state.editingActivityClassId);
+  const canSave = subjects.length > 0 && !state.editingActivitySubmitting;
+  const selectedFile = state.editingActivityResourceFile;
+  const currentResource = state.editingActivityResource;
+  let resourceControl = '';
+  if (selectedFile) {
+    resourceControl = `
+      <div class="activity-resource-selected editing-resource-selected">
+        <div><strong>${escapeHtml(selectedFile.name)}</strong><small>${formatAttachmentSize(selectedFile.size)} · ${currentResource ? 'substituirá o material atual' : 'será adicionado como material de apoio'} ao salvar</small></div>
+        <button type="button" onclick="window.removeSelectedEditingActivityResource()" ${state.editingActivitySubmitting ? 'disabled' : ''}>Cancelar seleção</button>
+      </div>`;
+  } else if (currentResource && !state.editingActivityRemoveResource) {
+    resourceControl = `
+      <div class="activity-resource-selected editing-resource-selected">
+        <div><strong>${escapeHtml(currentResource.fileName)}</strong><small>${formatAttachmentSize(currentResource.size)} · material atual preservado</small></div>
+        <button type="button" class="remove-resource-btn" onclick="window.markEditingActivityResourceForRemoval()" ${state.editingActivitySubmitting ? 'disabled' : ''}>Remover material</button>
+      </div>
+      <label class="zip-file-picker ${state.editingActivitySubmitting ? 'disabled' : ''}">
+        <input type="file" accept=".zip,application/zip" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
+        <span>Substituir por outro ZIP</span>
+      </label>`;
+  } else if (currentResource && state.editingActivityRemoveResource) {
+    resourceControl = `
+      <div class="activity-resource-removal">
+        <span>O material atual será removido ao salvar.</span>
+        <button type="button" onclick="window.undoEditingActivityResourceRemoval()" ${state.editingActivitySubmitting ? 'disabled' : ''}>Desfazer</button>
+      </div>
+      <label class="zip-file-picker ${state.editingActivitySubmitting ? 'disabled' : ''}">
+        <input type="file" accept=".zip,application/zip" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
+        <span>Selecionar novo ZIP</span>
+      </label>`;
+  } else {
+    resourceControl = `
+      <label class="zip-file-picker ${state.editingActivitySubmitting ? 'disabled' : ''}">
+        <input type="file" accept=".zip,application/zip" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
+        <span>Adicionar arquivo ZIP de apoio</span>
+      </label>`;
+  }
+
+  mainContent.innerHTML = `
+    <section class="exam-page activities-management-page activity-editing-page">
+      <div class="exam-page-heading">
+        <div><span class="eyebrow">Editar atividade</span><h2>${escapeHtml(state.editingActivityTitle)}</h2><p>Atualize os dados e o material de apoio. Entregas existentes serão preservadas.</p></div>
+        <button class="secondary-btn" type="button" onclick="window.cancelActivityEditing()" ${state.editingActivitySubmitting ? 'disabled' : ''}>Cancelar edição</button>
+      </div>
+      ${state.activitiesMessage ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
+      ${subjects.length ? '' : '<div class="exam-alert error">Cadastre uma matéria para a turma selecionada antes de salvar a atividade.</div>'}
+      <form class="exam-builder activity-builder activity-editor" onsubmit="window.submitActivityUpdate(event)">
+        <label class="exam-field"><span>Título da atividade</span><input minlength="3" maxlength="160" required value="${escapeHtml(state.editingActivityTitle)}" oninput="window.updateEditingActivityDraft('title', this.value)" ${state.editingActivitySubmitting ? 'disabled' : ''} /></label>
+        <label class="exam-field"><span>Turma</span><select required onchange="window.updateEditingActivityDraft('classId', this.value)" ${state.editingActivitySubmitting ? 'disabled' : ''}>${renderAcademicOptions(state.academicClasses, state.editingActivityClassId, 'Selecione a turma')}</select></label>
+        <label class="exam-field"><span>Matéria</span><select required onchange="window.updateEditingActivityDraft('subjectId', this.value)" ${state.editingActivitySubmitting ? 'disabled' : ''}>${renderAcademicOptions(subjects, state.editingActivitySubjectId, 'Selecione a matéria')}</select></label>
+        <label class="exam-field activity-due-date-field"><span>Data de entrega</span><input type="datetime-local" required value="${escapeHtml(state.editingActivityDueAt)}" oninput="window.updateEditingActivityDraft('dueAt', this.value)" ${state.editingActivitySubmitting ? 'disabled' : ''} /><small>Uma data passada encerra imediatamente novas entregas.</small></label>
+        <label class="exam-field activity-instructions-field"><span>Orientações</span><textarea maxlength="5000" rows="6" required oninput="window.updateEditingActivityDraft('instructions', this.value)" ${state.editingActivitySubmitting ? 'disabled' : ''}>${escapeHtml(state.editingActivityInstructions)}</textarea></label>
+        <div class="activity-resource-field editing-activity-resource-field">
+          <div class="activity-resource-heading"><span class="attached-file-icon">ZIP</span><div><strong>Arquivo de apoio</strong><p>Adicione, substitua, preserve ou remova o material vinculado à atividade.</p></div></div>
+          ${resourceControl}
+          <small>Somente ZIP de até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}.</small>
+          <div class="zip-upload-status ${state.editingActivityResourceType}" role="status">${escapeHtml(state.editingActivityResourceMessage)}</div>
+        </div>
+        <div class="activity-editor-actions">
+          <button type="button" class="secondary-btn" onclick="window.cancelActivityEditing()" ${state.editingActivitySubmitting ? 'disabled' : ''}>Cancelar</button>
+          <button class="next-btn" type="submit" ${canSave ? '' : 'disabled'}>${state.editingActivitySubmitting ? 'Salvando alterações...' : 'Salvar alterações'}</button>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
 function renderTeacherActivityCard(activity) {
   const status = getActivityStatus(activity);
   const statusLabel = status === ACTIVITY_STATUSES.ACTIVE
@@ -3263,6 +3478,7 @@ function renderTeacherActivityCard(activity) {
     ? '<span class="activity-archived-label">Somente consulta</span>'
     : `
       <div class="activity-management-actions">
+        <button type="button" class="secondary-btn" onclick="window.startEditingActivity('${activity.id}')">Editar</button>
         ${status === ACTIVITY_STATUSES.ACTIVE
           ? `<button type="button" class="deactivate-exam-btn" onclick="window.deactivateActivity('${activity.id}')">Desativar</button>`
           : `<button type="button" class="publish-exam-btn" onclick="window.activateActivity('${activity.id}')">Ativar</button>`}
@@ -3287,6 +3503,10 @@ function renderTeacherActivityCard(activity) {
 
 function renderTeacherActivities() {
   const mainContent = document.getElementById('main-content');
+  if (state.editingActivityId) {
+    renderTeacherActivityEditor(mainContent);
+    return;
+  }
   if (state.activitiesStatus === 'idle') {
     state.activitiesStatus = 'loading';
     queueMicrotask(async () => {
@@ -3306,7 +3526,7 @@ function renderTeacherActivities() {
   mainContent.innerHTML = `
     <section class="exam-page activities-management-page">
       <div class="exam-page-heading results-heading">
-        <div><span class="eyebrow">Área do professor</span><h2>Atividades cadastradas</h2><p>Visualize, ative, desative, acompanhe entregas em ZIP ou arquive atividades.</p></div>
+        <div><span class="eyebrow">Área do professor</span><h2>Atividades cadastradas</h2><p>Visualize, edite, ative, desative, acompanhe entregas em ZIP ou arquive atividades.</p></div>
         <button class="secondary-btn" onclick="window.refreshActivities()">Atualizar lista</button>
       </div>
       ${state.activitiesMessage && state.activitiesStatus !== 'error' ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
@@ -5657,6 +5877,138 @@ window.submitActivity = async event => {
     state.teacherActivitySubmitting = false;
   }
   renderTeacherActivityCreator();
+};
+
+window.startEditingActivity = activityId => {
+  const activity = state.activities.find(item => item.id === activityId);
+  if (!activity || activity.deleted) return;
+  state.activitiesMessage = '';
+  state.editingActivityId = activity.id;
+  state.editingActivityTitle = activity.title;
+  state.editingActivityInstructions = activity.instructions;
+  state.editingActivityDueAt = activity.dueAtMillis ? formatDateTimeLocal(activity.dueAtMillis) : '';
+  state.editingActivityClassId = activity.classId || 'entra21';
+  state.editingActivitySubjectId = resolveExamSubjectSelection(
+    state.academicSubjects,
+    state.editingActivityClassId,
+    activity.subjectId,
+    activity.subjectName
+  );
+  state.editingActivityResource = activity.resource ? { ...activity.resource } : null;
+  state.editingActivityResourceFile = null;
+  state.editingActivityRemoveResource = false;
+  state.editingActivityResourceMessage = '';
+  state.editingActivityResourceType = '';
+  state.editingActivitySubmitting = false;
+  renderTeacherActivities();
+};
+
+window.cancelActivityEditing = () => {
+  if (state.editingActivitySubmitting) return;
+  resetActivityEditingState();
+  state.activitiesMessage = '';
+  renderTeacherActivities();
+};
+
+window.updateEditingActivityDraft = (field, value) => {
+  if (state.editingActivitySubmitting) return;
+  const fields = {
+    title: 'editingActivityTitle',
+    instructions: 'editingActivityInstructions',
+    dueAt: 'editingActivityDueAt',
+    classId: 'editingActivityClassId',
+    subjectId: 'editingActivitySubjectId'
+  };
+  if (!fields[field]) return;
+  state[fields[field]] = value;
+  if (field === 'classId') {
+    const subjects = getSubjectsForClass(state.academicSubjects, value);
+    if (!subjects.some(subject => subject.id === state.editingActivitySubjectId)) {
+      state.editingActivitySubjectId = '';
+    }
+    renderTeacherActivities();
+  }
+};
+
+window.selectEditingActivityResource = input => {
+  const file = input?.files?.[0];
+  if (!file || state.editingActivitySubmitting) return;
+  try {
+    validateActivityResourceFile(file);
+    state.editingActivityResourceFile = file;
+    state.editingActivityRemoveResource = false;
+    state.editingActivityResourceMessage = 'Novo ZIP selecionado. A substituição ocorrerá somente ao salvar.';
+    state.editingActivityResourceType = '';
+  } catch (error) {
+    state.editingActivityResourceFile = null;
+    state.editingActivityResourceMessage = getFriendlyError(error, 'Arquivo ZIP inválido.');
+    state.editingActivityResourceType = 'error';
+    input.value = '';
+  }
+  renderTeacherActivities();
+};
+
+window.removeSelectedEditingActivityResource = () => {
+  if (state.editingActivitySubmitting) return;
+  state.editingActivityResourceFile = null;
+  state.editingActivityRemoveResource = false;
+  state.editingActivityResourceMessage = '';
+  state.editingActivityResourceType = '';
+  renderTeacherActivities();
+};
+
+window.markEditingActivityResourceForRemoval = () => {
+  if (state.editingActivitySubmitting) return;
+  state.editingActivityResourceFile = null;
+  state.editingActivityRemoveResource = true;
+  state.editingActivityResourceMessage = 'O material será removido quando as alterações forem salvas.';
+  state.editingActivityResourceType = '';
+  renderTeacherActivities();
+};
+
+window.undoEditingActivityResourceRemoval = () => {
+  if (state.editingActivitySubmitting) return;
+  state.editingActivityRemoveResource = false;
+  state.editingActivityResourceMessage = '';
+  state.editingActivityResourceType = '';
+  renderTeacherActivities();
+};
+
+window.submitActivityUpdate = async event => {
+  event.preventDefault();
+  if (state.editingActivitySubmitting || !state.editingActivityId) return;
+  state.editingActivitySubmitting = true;
+  state.activitiesMessage = '';
+  state.editingActivityResourceMessage = state.editingActivityResourceFile
+    ? 'Validando e substituindo o arquivo de apoio...'
+    : 'Salvando alterações...';
+  state.editingActivityResourceType = 'uploading';
+  renderTeacherActivities();
+  try {
+    const result = await updateActivityOnFreeTier({
+      activityId: state.editingActivityId,
+      title: state.editingActivityTitle,
+      instructions: state.editingActivityInstructions,
+      dueAt: state.editingActivityDueAt,
+      classId: state.editingActivityClassId,
+      subjectId: state.editingActivitySubjectId
+    }, state.editingActivityResourceFile, state.editingActivityRemoveResource);
+    resetActivityEditingState();
+    state.activitiesMessage = result.resourceAction === 'replaced'
+      ? 'Atividade e material de apoio atualizados. As entregas existentes foram preservadas.'
+      : result.resourceAction === 'added'
+        ? 'Atividade atualizada e material de apoio adicionado. As entregas existentes foram preservadas.'
+        : result.resourceAction === 'removed'
+          ? 'Atividade atualizada e material de apoio removido. As entregas existentes foram preservadas.'
+          : 'Atividade atualizada com sucesso. Entregas e material de apoio foram preservados.';
+    await loadActivities();
+  } catch (error) {
+    state.editingActivitySubmitting = false;
+    state.editingActivityResourceType = 'error';
+    state.editingActivityResourceMessage = getFriendlyError(error, 'Não foi possível atualizar a atividade.');
+    state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível atualizar a atividade.')}`;
+  }
+  renderTeacherActivities();
 };
 
 window.activateActivity = async activityId => {
