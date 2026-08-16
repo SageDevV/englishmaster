@@ -4586,6 +4586,12 @@ header > p {
   grid-column: 1 / -1;
 }
 
+.activity-due-date-field small {
+  color: var(--text-muted);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
 .activity-builder .next-btn {
   justify-self: start;
   width: auto;
@@ -4649,6 +4655,32 @@ header > p {
   color: #c4b5fd;
 }
 
+.activity-deadline {
+  display: grid;
+  gap: 0.2rem;
+  padding: 0.8rem 0.9rem;
+  border: 1px solid rgba(34, 211, 238, 0.2);
+  border-radius: 0.75rem;
+  background: rgba(34, 211, 238, 0.045);
+}
+
+.activity-deadline span {
+  color: #67e8f9;
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.activity-deadline small { color: var(--text-muted); }
+.activity-deadline.expired {
+  border-color: rgba(248, 113, 113, 0.3);
+  background: rgba(239, 68, 68, 0.055);
+}
+.activity-deadline.expired span,
+.activity-delivery-closed { color: #fca5a5; }
+.activity-deadline.legacy { border-style: dashed; }
+
 .activity-submission-list {
   display: grid;
   gap: 0.55rem;
@@ -4693,6 +4725,19 @@ header > p {
   border-style: solid;
   border-color: rgba(16, 185, 129, 0.42);
   background: rgba(16, 185, 129, 0.045);
+}
+
+.student-activity-delivery.closed {
+  border-color: rgba(248, 113, 113, 0.32);
+  background: rgba(239, 68, 68, 0.04);
+}
+
+.activity-delivery-closed {
+  padding: 0.75rem;
+  border-radius: 0.65rem;
+  background: rgba(127, 29, 29, 0.22);
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 
 @media (max-width: 760px) {

@@ -222,6 +222,8 @@ service cloud.firestore {
         && data.subjectName == activity.data.subjectName
         && activity.data.active == true
         && activity.data.deleted == false
+        && (!activity.data.keys().hasAny(['dueAt'])
+          || (activity.data.dueAt is timestamp && request.time <= activity.data.dueAt))
         && ((profile.data.studentProfile.keys().hasAny(['classId'])
               && profile.data.studentProfile.classId == activity.data.classId)
           || (!(profile.data.studentProfile.keys().hasAny(['classId']))

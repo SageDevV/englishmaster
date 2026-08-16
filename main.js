@@ -57,7 +57,9 @@ import {
 } from './src/services/academicServices.js';
 import {
   ACTIVITY_STATUSES,
+  canSubmitActivity,
   getActivityStatus,
+  isActivityPastDue,
   validateActivity,
   validateActivityResourceFile
 } from './src/services/activityServices.js';
@@ -497,6 +499,7 @@ function serializeActivityDocument(doc) {
     className: data.className || '',
     subjectId: data.subjectId || '',
     subjectName: data.subjectName || '',
+    dueAtMillis: timestampToMillis(data.dueAt),
     active: data.active === true,
     deleted: data.deleted === true,
     createdAtMillis: timestampToMillis(data.createdAt),
@@ -693,6 +696,7 @@ async function createActivityOnFreeTier(data, resourceFile = null) {
     const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
     await activityRef.set({
       ...activity,
+      dueAt: firebase.firestore.Timestamp.fromDate(new Date(activity.dueAt)),
       resource: resourceMetadata,
       active: true,
       deleted: false,
@@ -790,6 +794,9 @@ function updateActivityUploadStatus(activityId, message, progress = null, type =
 async function uploadActivitySubmission(activity, file) {
   if (!activity?.id || activity.active !== true || activity.deleted === true) {
     throw new Error('Esta atividade não está disponível para entrega.');
+  }
+  if (isActivityPastDue(activity)) {
+    throw new Error('O prazo de entrega desta atividade já foi encerrado.');
   }
   const descriptor = validateZipFileDescriptor(file);
   updateActivityUploadStatus(activity.id, 'Validando arquivo ZIP...', 3, 'uploading');
@@ -1778,6 +1785,7 @@ const state = {
   activityUploads: {},
   teacherActivityTitle: '',
   teacherActivityInstructions: '',
+  teacherActivityDueAt: '',
   teacherActivityClassId: 'entra21',
   teacherActivitySubjectId: '',
   teacherActivityResourceFile: null,
@@ -1879,6 +1887,7 @@ auth.onAuthStateChanged(async (user) => {
       state.activitiesStatus = 'idle';
       state.activitiesMessage = '';
       state.activityUploads = {};
+      state.teacherActivityDueAt = '';
       state.teacherActivityResourceFile = null;
       state.teacherActivityResourceMessage = '';
       state.teacherActivityResourceProgress = 0;
@@ -3195,6 +3204,7 @@ function renderTeacherActivityCreator() {
         <label class="exam-field"><span>Título da atividade</span><input name="title" minlength="3" maxlength="160" required value="${escapeHtml(state.teacherActivityTitle)}" oninput="window.updateActivityDraft('title', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''} placeholder="Ex.: Projeto final de JavaScript" /></label>
         <label class="exam-field"><span>Turma</span><select name="classId" required onchange="window.updateActivityDraft('classId', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''}>${renderAcademicOptions(state.academicClasses, state.teacherActivityClassId, 'Selecione a turma')}</select></label>
         <label class="exam-field"><span>Matéria</span><select name="subjectId" required onchange="window.updateActivityDraft('subjectId', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''}>${renderAcademicOptions(subjects, state.teacherActivitySubjectId, 'Selecione a matéria')}</select></label>
+        <label class="exam-field activity-due-date-field"><span>Data de entrega</span><input type="datetime-local" name="dueAt" required min="${formatDateTimeLocal(Date.now() + 60000)}" value="${escapeHtml(state.teacherActivityDueAt)}" oninput="window.updateActivityDraft('dueAt', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''} /><small>Após esse horário, novas entregas e substituições serão bloqueadas.</small></label>
         <label class="exam-field activity-instructions-field"><span>Orientações</span><textarea name="instructions" maxlength="5000" rows="6" required oninput="window.updateActivityDraft('instructions', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''} placeholder="Descreva o que deve ser entregue e como preparar o arquivo ZIP">${escapeHtml(state.teacherActivityInstructions)}</textarea></label>
         <div class="activity-resource-field">
           <div class="activity-resource-heading">
@@ -3219,6 +3229,26 @@ function renderTeacherActivityCreator() {
         <button class="next-btn" type="submit" ${canCreate ? '' : 'disabled'}>${state.teacherActivitySubmitting ? 'Publicando atividade...' : 'Cadastrar atividade'}</button>
       </form>
     </section>
+  `;
+}
+
+function formatDateTimeLocal(value) {
+  const date = new Date(value);
+  const localDate = new Date(date.getTime() - (date.getTimezoneOffset() * 60000));
+  return localDate.toISOString().slice(0, 16);
+}
+
+function renderActivityDeadline(activity) {
+  if (!activity.dueAtMillis) {
+    return '<div class="activity-deadline legacy"><span>Data de entrega</span><strong>Sem prazo definido</strong><small>Atividade anterior à configuração de prazos.</small></div>';
+  }
+  const expired = isActivityPastDue(activity);
+  return `
+    <div class="activity-deadline ${expired ? 'expired' : 'open'}">
+      <span>${expired ? 'Prazo encerrado' : 'Data de entrega'}</span>
+      <strong>${formatExamDate(activity.dueAtMillis)}</strong>
+      <small>${expired ? 'Novas entregas e substituições estão bloqueadas.' : 'Entregas permitidas até esse horário.'}</small>
+    </div>
   `;
 }
 
@@ -3247,6 +3277,7 @@ function renderTeacherActivityCard(activity) {
       </div>
       <h3>${escapeHtml(activity.title)}</h3>
       <p>${escapeHtml(activity.instructions)}</p>
+      ${renderActivityDeadline(activity)}
       ${renderActivityResource(activity)}
       <div class="activity-card-actions"><strong>${activity.submissions.length} entrega(s)</strong>${actions}</div>
       ${renderActivitySubmissionRows(activity.submissions)}
@@ -3289,20 +3320,23 @@ function renderStudentActivityUpload(activity) {
   const submission = activity.submission;
   const upload = state.activityUploads[activity.id];
   const uploading = upload?.type === 'uploading';
+  const submissionOpen = canSubmitActivity(activity);
   return `
-    <div class="student-activity-delivery ${submission?.status === 'ready' ? 'delivered' : ''}">
+    <div class="student-activity-delivery ${submission?.status === 'ready' ? 'delivered' : ''} ${submissionOpen ? '' : 'closed'}">
       ${submission?.status === 'ready' ? `
         <div class="attached-file-summary">
           <span class="attached-file-icon">ZIP</span>
           <span><strong>${escapeHtml(submission.fileName)}</strong><small>${formatAttachmentSize(submission.size)} · enviado em ${formatExamDate(submission.submittedAtMillis)}</small></span>
         </div>
       ` : '<p>Nenhuma entrega encaminhada.</p>'}
-      <label class="zip-file-picker ${uploading ? 'disabled' : ''}">
-        <input type="file" accept=".zip,application/zip" ${uploading ? 'disabled' : ''} onchange="window.handleActivityZipUpload('${activity.id}', this)" />
-        <span>${submission?.status === 'ready' ? 'Substituir arquivo ZIP' : 'Selecionar e encaminhar ZIP'}</span>
-      </label>
+      ${submissionOpen ? `
+        <label class="zip-file-picker ${uploading ? 'disabled' : ''}">
+          <input type="file" accept=".zip,application/zip" ${uploading ? 'disabled' : ''} onchange="window.handleActivityZipUpload('${activity.id}', this)" />
+          <span>${submission?.status === 'ready' ? 'Substituir arquivo ZIP' : 'Selecionar e encaminhar ZIP'}</span>
+        </label>
+      ` : `<div class="activity-delivery-closed">🔒 Prazo encerrado. ${submission?.status === 'ready' ? 'Sua entrega foi preservada.' : 'Não é mais possível encaminhar o arquivo.'}</div>`}
       <div class="zip-upload-progress-track" aria-hidden="true"><span id="activity-upload-progress-${activity.id}" style="width: ${upload?.progress || (submission?.status === 'ready' ? 100 : 0)}%"></span></div>
-      <div id="activity-upload-status-${activity.id}" class="zip-upload-status ${upload?.type || (submission?.status === 'ready' ? 'success' : '')}" role="status">${escapeHtml(upload?.message || (submission?.status === 'ready' ? 'Atividade encaminhada. Você pode substituir o ZIP enquanto ela estiver ativa.' : 'Arquivo ZIP de até 5 MB.'))}</div>
+      <div id="activity-upload-status-${activity.id}" class="zip-upload-status ${upload?.type || (submission?.status === 'ready' ? 'success' : '')}" role="status">${escapeHtml(upload?.message || (!submissionOpen ? 'O prazo de entrega foi encerrado.' : submission?.status === 'ready' ? 'Atividade encaminhada. Você pode substituir o ZIP até a data de entrega.' : 'Arquivo ZIP de até 5 MB.'))}</div>
     </div>
   `;
 }
@@ -3337,6 +3371,7 @@ function renderStudentActivities() {
                 <div class="activity-card-topline"><span>${escapeHtml(activity.subjectName)}</span><small>${escapeHtml(activity.className)}</small></div>
                 <h3>${escapeHtml(activity.title)}</h3>
                 <div class="activity-instructions">${escapeHtml(activity.instructions)}</div>
+                ${renderActivityDeadline(activity)}
                 ${renderActivityResource(activity)}
                 ${renderStudentActivityUpload(activity)}
               </article>
@@ -5540,6 +5575,7 @@ window.updateActivityDraft = (field, value) => {
   const fields = {
     title: 'teacherActivityTitle',
     instructions: 'teacherActivityInstructions',
+    dueAt: 'teacherActivityDueAt',
     classId: 'teacherActivityClassId',
     subjectId: 'teacherActivitySubjectId'
   };
@@ -5597,11 +5633,13 @@ window.submitActivity = async event => {
     const result = await createActivityOnFreeTier({
       title: state.teacherActivityTitle,
       instructions: state.teacherActivityInstructions,
+      dueAt: state.teacherActivityDueAt,
       classId: state.teacherActivityClassId,
       subjectId: state.teacherActivitySubjectId
     }, state.teacherActivityResourceFile);
     state.teacherActivityTitle = '';
     state.teacherActivityInstructions = '';
+    state.teacherActivityDueAt = '';
     state.teacherActivityResourceFile = null;
     state.teacherActivityResourceProgress = 0;
     state.teacherActivityResourceType = '';
