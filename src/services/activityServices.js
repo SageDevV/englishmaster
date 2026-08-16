@@ -1,4 +1,5 @@
 import { validateAcademicSelection } from './academicServices.js';
+import { validateZipFileDescriptor } from './examServices.js';
 
 export const MAX_ACTIVITY_TITLE_LENGTH = 160;
 export const MAX_ACTIVITY_INSTRUCTIONS_LENGTH = 5000;
@@ -21,5 +22,15 @@ export function validateActivity(data = {}, classes = [], subjects = []) {
     title,
     instructions,
     ...validateAcademicSelection(data, classes, subjects)
+  };
+}
+
+
+
+export function validateActivityResourceFile(file = {}) {
+  const descriptor = validateZipFileDescriptor(file);
+  return {
+    ...descriptor,
+    contentType: 'application/zip'
   };
 }

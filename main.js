@@ -55,7 +55,10 @@ import {
   validateAcademicSelection,
   validateStudyReference
 } from './src/services/academicServices.js';
-import { validateActivity } from './src/services/activityServices.js';
+import {
+  validateActivity,
+  validateActivityResourceFile
+} from './src/services/activityServices.js';
 import {
   filterCommunityPosts,
   MAX_COMMUNITY_POST_CONTENT_LENGTH,
@@ -466,6 +469,22 @@ async function loadCommunityPosts() {
   }
 }
 
+function serializeActivityResource(doc) {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    activityId: data.activityId || doc.id,
+    fileName: data.fileName || '',
+    contentType: data.contentType || 'application/zip',
+    size: Number(data.size || 0),
+    chunkCount: Number(data.chunkCount || 0),
+    sha256: data.sha256 || '',
+    status: data.status || 'uploading',
+    uploadedAtMillis: timestampToMillis(data.uploadedAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt)
+  };
+}
+
 function serializeActivityDocument(doc) {
   const data = doc.data();
   return {
@@ -480,6 +499,13 @@ function serializeActivityDocument(doc) {
     deleted: data.deleted === true,
     createdAtMillis: timestampToMillis(data.createdAt),
     updatedAtMillis: timestampToMillis(data.updatedAt),
+    resource: data.resource?.status === 'ready' ? {
+      fileName: data.resource.fileName || '',
+      size: Number(data.resource.size || 0),
+      chunkCount: Number(data.resource.chunkCount || 0),
+      sha256: data.resource.sha256 || '',
+      status: 'ready'
+    } : null,
     submissions: [],
     submission: null
   };
@@ -574,20 +600,150 @@ async function loadActivities() {
   }
 }
 
-async function createActivityOnFreeTier(data) {
+function updateTeacherActivityResourceStatus(message, progress = null, type = '') {
+  state.teacherActivityResourceMessage = message;
+  state.teacherActivityResourceType = type;
+  if (progress !== null) state.teacherActivityResourceProgress = progress;
+  const status = document.getElementById('teacher-activity-resource-status');
+  if (status) {
+    status.textContent = message;
+    status.className = `zip-upload-status ${type}`.trim();
+  }
+  const progressBar = document.getElementById('teacher-activity-resource-progress');
+  if (progressBar && progress !== null) progressBar.style.width = `${progress}%`;
+}
+
+async function cleanupActivityResourceDraft(resourceRef, chunkCount) {
+  if (!resourceRef) return;
+  await Promise.allSettled(Array.from({ length: chunkCount }, (_, index) =>
+    resourceRef.collection('chunks').doc(String(index)).delete()
+  ));
+  await resourceRef.delete().catch(() => {});
+}
+
+async function createActivityOnFreeTier(data, resourceFile = null) {
   if (!isAdmin()) throw new Error('Área exclusiva do professor.');
   const activity = validateActivity(data, state.academicClasses, state.academicSubjects);
-  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
-  const docRef = await db.collection('activities').add({
-    ...activity,
-    active: true,
-    deleted: false,
-    createdBy: state.user.uid,
-    createdByEmail: state.user.email || '',
-    createdAt: serverTimestamp,
-    updatedAt: serverTimestamp
+  const activityRef = db.collection('activities').doc();
+  let resourceRef = null;
+  let resourceChunkCount = 0;
+  let resourceMetadata = null;
+
+  try {
+    if (resourceFile) {
+      const descriptor = validateActivityResourceFile(resourceFile);
+      updateTeacherActivityResourceStatus('Validando o arquivo ZIP de apoio...', 3, 'uploading');
+      const bytes = new Uint8Array(await resourceFile.arrayBuffer());
+      if (!hasZipFileSignature(bytes)) {
+        throw new Error('O conteúdo do arquivo de apoio não corresponde a um ZIP válido.');
+      }
+      const chunks = splitAttachmentBytes(bytes);
+      const sha256 = await hashAttachmentBytes(bytes);
+      resourceChunkCount = chunks.length;
+      resourceRef = db.collection('activityResources').doc(activityRef.id);
+      const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+      await resourceRef.set({
+        activityId: activityRef.id,
+        activityTitle: activity.title,
+        classId: activity.classId,
+        className: activity.className,
+        subjectId: activity.subjectId,
+        subjectName: activity.subjectName,
+        fileName: descriptor.name,
+        contentType: descriptor.contentType,
+        size: descriptor.size,
+        chunkCount: chunks.length,
+        sha256,
+        status: 'uploading',
+        uploadedBy: state.user.uid,
+        uploadedAt: serverTimestamp,
+        updatedAt: serverTimestamp
+      });
+      for (let index = 0; index < chunks.length; index++) {
+        const chunk = chunks[index];
+        await resourceRef.collection('chunks').doc(String(index)).set({
+          index,
+          size: chunk.length,
+          data: firebase.firestore.Blob.fromUint8Array(chunk),
+          updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+        });
+        const progress = Math.min(94, Math.round(((index + 1) / chunks.length) * 86) + 5);
+        updateTeacherActivityResourceStatus(
+          `Enviando parte ${index + 1} de ${chunks.length}...`,
+          progress,
+          'uploading'
+        );
+      }
+      await resourceRef.update({
+        status: 'ready',
+        updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+      });
+      resourceMetadata = {
+        fileName: descriptor.name,
+        size: descriptor.size,
+        chunkCount: chunks.length,
+        sha256,
+        status: 'ready'
+      };
+      updateTeacherActivityResourceStatus('Finalizando a publicação...', 97, 'uploading');
+    }
+
+    const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+    await activityRef.set({
+      ...activity,
+      resource: resourceMetadata,
+      active: true,
+      deleted: false,
+      createdBy: state.user.uid,
+      createdByEmail: state.user.email || '',
+      createdAt: serverTimestamp,
+      updatedAt: serverTimestamp
+    });
+    if (resourceFile) updateTeacherActivityResourceStatus('Arquivo de apoio enviado com sucesso.', 100, 'success');
+    return { ok: true, id: activityRef.id, resource: resourceMetadata };
+  } catch (error) {
+    await cleanupActivityResourceDraft(resourceRef, resourceChunkCount);
+    throw error;
+  }
+}
+
+async function downloadActivityResourceOnFreeTier(activity) {
+  if (!activity?.id || !activity.resource) throw new Error('Esta atividade não possui arquivo de apoio.');
+  const resourceRef = db.collection('activityResources').doc(activity.id);
+  const resourceDoc = await resourceRef.get();
+  if (!resourceDoc.exists || resourceDoc.data().status !== 'ready') {
+    throw new Error('O arquivo de apoio não foi encontrado ou ainda está incompleto.');
+  }
+  const metadata = serializeActivityResource(resourceDoc);
+  const maxChunks = Math.ceil(MAX_ZIP_FILE_SIZE_BYTES / ATTACHMENT_CHUNK_SIZE_BYTES);
+  if (metadata.chunkCount < 1 || metadata.chunkCount > maxChunks) {
+    throw new Error('Quantidade de partes do arquivo de apoio inválida.');
+  }
+  const chunkDocs = await Promise.all(Array.from({ length: metadata.chunkCount }, (_, index) =>
+    resourceRef.collection('chunks').doc(String(index)).get()
+  ));
+  if (chunkDocs.some(doc => !doc.exists)) throw new Error('O arquivo de apoio está incompleto.');
+  const chunks = chunkDocs.map(doc => doc.data().data.toUint8Array());
+  const totalSize = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+  if (totalSize !== metadata.size) throw new Error('O tamanho do arquivo de apoio não confere.');
+  const bytes = new Uint8Array(totalSize);
+  let offset = 0;
+  chunks.forEach(chunk => {
+    bytes.set(chunk, offset);
+    offset += chunk.length;
   });
-  return { ok: true, id: docRef.id };
+  if (!hasZipFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
+    throw new Error('A integridade do arquivo de apoio não pôde ser confirmada.');
+  }
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = metadata.fileName || 'material-de-apoio.zip';
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  return { ok: true, fileName: metadata.fileName };
 }
 
 async function archiveActivityOnFreeTier(activityId) {
@@ -1605,6 +1761,11 @@ const state = {
   teacherActivityInstructions: '',
   teacherActivityClassId: 'entra21',
   teacherActivitySubjectId: '',
+  teacherActivityResourceFile: null,
+  teacherActivityResourceMessage: '',
+  teacherActivityResourceProgress: 0,
+  teacherActivityResourceType: '',
+  teacherActivitySubmitting: false,
   examSaveTimer: null,
   examSubmitting: false,
   examAutoSubmitAttempted: false,
@@ -1699,6 +1860,11 @@ auth.onAuthStateChanged(async (user) => {
       state.activitiesStatus = 'idle';
       state.activitiesMessage = '';
       state.activityUploads = {};
+      state.teacherActivityResourceFile = null;
+      state.teacherActivityResourceMessage = '';
+      state.teacherActivityResourceProgress = 0;
+      state.teacherActivityResourceType = '';
+      state.teacherActivitySubmitting = false;
       state.teacherStudents = [];
       state.teacherStudentsStatus = 'idle';
       state.teacherStudentsMessage = '';
@@ -2969,6 +3135,17 @@ function renderReferenceCards(references, admin = false) {
 }
 
 
+function renderActivityResource(activity) {
+  if (!activity.resource) return '';
+  return `
+    <div class="activity-support-resource">
+      <span class="attached-file-icon">ZIP</span>
+      <div><strong>Material de apoio</strong><span>${escapeHtml(activity.resource.fileName)}</span><small>${formatAttachmentSize(activity.resource.size)} · disponibilizado pelo professor</small></div>
+      <button type="button" class="download-attachment-btn" onclick="window.downloadActivityResource('${activity.id}')">Baixar ZIP</button>
+    </div>
+  `;
+}
+
 function renderActivitySubmissionRows(submissions) {
   if (!submissions.length) {
     return '<div class="activity-no-submissions">Nenhuma entrega encaminhada até o momento.</div>';
@@ -2985,21 +3162,42 @@ function renderActivitySubmissionRows(submissions) {
 function renderTeacherActivityCreator() {
   const mainContent = document.getElementById('main-content');
   const subjects = getSubjectsForClass(state.academicSubjects, state.teacherActivityClassId);
-  const canCreate = subjects.length > 0;
+  const canCreate = subjects.length > 0 && !state.teacherActivitySubmitting;
+  const resourceFile = state.teacherActivityResourceFile;
   mainContent.innerHTML = `
     <section class="exam-page activities-management-page activity-creation-page">
       <div class="exam-page-heading">
         <div><span class="eyebrow">Entregas em ZIP</span><h2>Cadastrar atividade</h2><p>Publique uma nova atividade com orientações direcionadas por turma e matéria.</p></div>
-        <button class="secondary-btn" onclick="window.navigateTo('hub')">Voltar ao Hub</button>
+        <button class="secondary-btn" onclick="window.navigateTo('hub')" ${state.teacherActivitySubmitting ? 'disabled' : ''}>Voltar ao Hub</button>
       </div>
       ${state.activitiesMessage ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
-      ${canCreate ? '' : '<div class="exam-alert error">Cadastre uma matéria para a turma selecionada antes de criar uma atividade.</div>'}
+      ${subjects.length ? '' : '<div class="exam-alert error">Cadastre uma matéria para a turma selecionada antes de criar uma atividade.</div>'}
       <form class="exam-builder activity-builder" onsubmit="window.submitActivity(event)">
-        <label class="exam-field"><span>Título da atividade</span><input name="title" minlength="3" maxlength="160" required value="${escapeHtml(state.teacherActivityTitle)}" oninput="window.updateActivityDraft('title', this.value)" placeholder="Ex.: Projeto final de JavaScript" /></label>
-        <label class="exam-field"><span>Turma</span><select name="classId" required onchange="window.updateActivityDraft('classId', this.value)">${renderAcademicOptions(state.academicClasses, state.teacherActivityClassId, 'Selecione a turma')}</select></label>
-        <label class="exam-field"><span>Matéria</span><select name="subjectId" required onchange="window.updateActivityDraft('subjectId', this.value)">${renderAcademicOptions(subjects, state.teacherActivitySubjectId, 'Selecione a matéria')}</select></label>
-        <label class="exam-field activity-instructions-field"><span>Orientações</span><textarea name="instructions" maxlength="5000" rows="6" required oninput="window.updateActivityDraft('instructions', this.value)" placeholder="Descreva o que deve ser entregue e como preparar o arquivo ZIP">${escapeHtml(state.teacherActivityInstructions)}</textarea></label>
-        <button class="next-btn" type="submit" ${canCreate ? '' : 'disabled'}>Cadastrar atividade</button>
+        <label class="exam-field"><span>Título da atividade</span><input name="title" minlength="3" maxlength="160" required value="${escapeHtml(state.teacherActivityTitle)}" oninput="window.updateActivityDraft('title', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''} placeholder="Ex.: Projeto final de JavaScript" /></label>
+        <label class="exam-field"><span>Turma</span><select name="classId" required onchange="window.updateActivityDraft('classId', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''}>${renderAcademicOptions(state.academicClasses, state.teacherActivityClassId, 'Selecione a turma')}</select></label>
+        <label class="exam-field"><span>Matéria</span><select name="subjectId" required onchange="window.updateActivityDraft('subjectId', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''}>${renderAcademicOptions(subjects, state.teacherActivitySubjectId, 'Selecione a matéria')}</select></label>
+        <label class="exam-field activity-instructions-field"><span>Orientações</span><textarea name="instructions" maxlength="5000" rows="6" required oninput="window.updateActivityDraft('instructions', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''} placeholder="Descreva o que deve ser entregue e como preparar o arquivo ZIP">${escapeHtml(state.teacherActivityInstructions)}</textarea></label>
+        <div class="activity-resource-field">
+          <div class="activity-resource-heading">
+            <span class="attached-file-icon">ZIP</span>
+            <div><strong>Arquivo de apoio</strong><p>Opcional. Anexe um ZIP com código inicial, exemplos, imagens ou outros materiais para auxiliar o aluno.</p></div>
+          </div>
+          ${resourceFile ? `
+            <div class="activity-resource-selected">
+              <div><strong>${escapeHtml(resourceFile.name)}</strong><small>${formatAttachmentSize(resourceFile.size)} · pronto para enviar</small></div>
+              <button type="button" onclick="window.removeTeacherActivityResource()" ${state.teacherActivitySubmitting ? 'disabled' : ''}>Remover</button>
+            </div>
+          ` : `
+            <label class="zip-file-picker ${state.teacherActivitySubmitting ? 'disabled' : ''}">
+              <input type="file" accept=".zip,application/zip" ${state.teacherActivitySubmitting ? 'disabled' : ''} onchange="window.selectTeacherActivityResource(this)" />
+              <span>Selecionar arquivo ZIP de apoio</span>
+            </label>
+          `}
+          <small>Somente ZIP de até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}.</small>
+          <div class="zip-upload-progress-track" aria-hidden="true"><span id="teacher-activity-resource-progress" style="width:${state.teacherActivityResourceProgress}%"></span></div>
+          <div id="teacher-activity-resource-status" class="zip-upload-status ${state.teacherActivityResourceType}" role="status">${escapeHtml(state.teacherActivityResourceMessage)}</div>
+        </div>
+        <button class="next-btn" type="submit" ${canCreate ? '' : 'disabled'}>${state.teacherActivitySubmitting ? 'Publicando atividade...' : 'Cadastrar atividade'}</button>
       </form>
     </section>
   `;
@@ -3025,6 +3223,7 @@ function renderTeacherActivities() {
               <div class="activity-card-topline"><span>${escapeHtml(activity.subjectName)}</span><small>${escapeHtml(activity.className)} · ${activity.deleted ? 'Arquivada' : 'Ativa'}</small></div>
               <h3>${escapeHtml(activity.title)}</h3>
               <p>${escapeHtml(activity.instructions)}</p>
+              ${renderActivityResource(activity)}
               <div class="activity-card-actions"><strong>${activity.submissions.length} entrega(s)</strong>${activity.deleted ? '<span class="activity-archived-label">Somente consulta</span>' : `<button type="button" class="delete-exam-btn" onclick="window.archiveActivity('${activity.id}')">Arquivar</button>`}</div>
               ${renderActivitySubmissionRows(activity.submissions)}
             </article>
@@ -3096,6 +3295,7 @@ function renderStudentActivities() {
                 <div class="activity-card-topline"><span>${escapeHtml(activity.subjectName)}</span><small>${escapeHtml(activity.className)}</small></div>
                 <h3>${escapeHtml(activity.title)}</h3>
                 <div class="activity-instructions">${escapeHtml(activity.instructions)}</div>
+                ${renderActivityResource(activity)}
                 ${renderStudentActivityUpload(activity)}
               </article>
             `).join('')}</div>`
@@ -5301,7 +5501,7 @@ window.updateActivityDraft = (field, value) => {
     classId: 'teacherActivityClassId',
     subjectId: 'teacherActivitySubjectId'
   };
-  if (!fields[field]) return;
+  if (!fields[field] || state.teacherActivitySubmitting) return;
   state[fields[field]] = value;
   if (field === 'classId') {
     const subjects = getSubjectsForClass(state.academicSubjects, value);
@@ -5312,24 +5512,69 @@ window.updateActivityDraft = (field, value) => {
   }
 };
 
+window.selectTeacherActivityResource = input => {
+  const file = input?.files?.[0];
+  if (!file || state.teacherActivitySubmitting) return;
+  try {
+    validateActivityResourceFile(file);
+    state.teacherActivityResourceFile = file;
+    state.teacherActivityResourceProgress = 0;
+    state.teacherActivityResourceType = '';
+    state.teacherActivityResourceMessage = 'Arquivo selecionado. O conteúdo será validado antes da publicação.';
+  } catch (error) {
+    state.teacherActivityResourceFile = null;
+    state.teacherActivityResourceProgress = 0;
+    state.teacherActivityResourceType = 'error';
+    state.teacherActivityResourceMessage = getFriendlyError(error, 'Arquivo ZIP inválido.');
+    input.value = '';
+  }
+  renderTeacherActivityCreator();
+};
+
+window.removeTeacherActivityResource = () => {
+  if (state.teacherActivitySubmitting) return;
+  state.teacherActivityResourceFile = null;
+  state.teacherActivityResourceProgress = 0;
+  state.teacherActivityResourceType = '';
+  state.teacherActivityResourceMessage = '';
+  renderTeacherActivityCreator();
+};
+
 window.submitActivity = async event => {
   event.preventDefault();
-  const button = event.currentTarget.querySelector('button[type="submit"]');
-  if (button) button.disabled = true;
+  if (state.teacherActivitySubmitting) return;
+  state.teacherActivitySubmitting = true;
   state.activitiesMessage = '';
+  if (!state.teacherActivityResourceFile) {
+    state.teacherActivityResourceMessage = '';
+    state.teacherActivityResourceProgress = 0;
+    state.teacherActivityResourceType = '';
+  }
+  renderTeacherActivityCreator();
   try {
-    await createActivityOnFreeTier({
+    const result = await createActivityOnFreeTier({
       title: state.teacherActivityTitle,
       instructions: state.teacherActivityInstructions,
       classId: state.teacherActivityClassId,
       subjectId: state.teacherActivitySubjectId
-    });
+    }, state.teacherActivityResourceFile);
     state.teacherActivityTitle = '';
     state.teacherActivityInstructions = '';
+    state.teacherActivityResourceFile = null;
+    state.teacherActivityResourceProgress = 0;
+    state.teacherActivityResourceType = '';
+    state.teacherActivityResourceMessage = '';
     state.activitiesStatus = 'idle';
-    state.activitiesMessage = 'Atividade cadastrada com sucesso.';
+    state.activitiesMessage = result.resource
+      ? 'Atividade e arquivo de apoio publicados com sucesso.'
+      : 'Atividade cadastrada com sucesso.';
   } catch (error) {
+    state.teacherActivityResourceProgress = 0;
+    state.teacherActivityResourceType = 'error';
+    state.teacherActivityResourceMessage = getFriendlyError(error, 'Não foi possível enviar o arquivo de apoio.');
     state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível cadastrar a atividade.')}`;
+  } finally {
+    state.teacherActivitySubmitting = false;
   }
   renderTeacherActivityCreator();
 };
@@ -5361,6 +5606,22 @@ window.handleActivityZipUpload = async (activityId, input) => {
     state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível encaminhar o ZIP.')}`;
   }
   if (state.currentView === 'student-activities') renderStudentActivities();
+};
+
+window.downloadActivityResource = async activityId => {
+  const activity = state.activities.find(item => item.id === activityId);
+  if (!activity?.resource) return;
+  state.activitiesMessage = 'Preparando o download do material de apoio...';
+  if (isAdmin()) renderTeacherActivities();
+  else renderStudentActivities();
+  try {
+    const result = await downloadActivityResourceOnFreeTier(activity);
+    state.activitiesMessage = `Material de apoio baixado: ${result.fileName}.`;
+  } catch (error) {
+    state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível baixar o material de apoio.')}`;
+  }
+  if (isAdmin()) renderTeacherActivities();
+  else renderStudentActivities();
 };
 
 window.downloadActivitySubmission = async submissionId => {

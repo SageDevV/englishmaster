@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { DEFAULT_ACADEMIC_CLASSES } from './academicServices.js';
 import {
   MAX_ACTIVITY_INSTRUCTIONS_LENGTH,
-  validateActivity
+  validateActivity,
+  validateActivityResourceFile
 } from './activityServices.js';
 
 const subjects = [{
@@ -44,5 +45,23 @@ describe('activity validation', () => {
       () => validateActivity({ title: 'Projeto', instructions: 'Faça.', classId: 'jovemprogramador', subjectId: 'subject-1' }, DEFAULT_ACADEMIC_CLASSES, subjects),
       /não pertence à turma/
     );
+  });
+});
+
+
+
+describe('activity support resource', () => {
+  it('accepts a ZIP resource within the size limit', () => {
+    assert.deepEqual(validateActivityResourceFile({ name: 'starter-kit.ZIP', size: 2048 }), {
+      name: 'starter-kit.ZIP',
+      size: 2048,
+      contentType: 'application/zip'
+    });
+  });
+
+  it('rejects empty, oversized and non-ZIP resources', () => {
+    assert.throws(() => validateActivityResourceFile({ name: 'material.pdf', size: 2048 }), /extensão \.zip/);
+    assert.throws(() => validateActivityResourceFile({ name: 'material.zip', size: 0 }), /vazio/);
+    assert.throws(() => validateActivityResourceFile({ name: 'material.zip', size: 6 * 1024 * 1024 }), /máximo 5 MB/);
   });
 });
