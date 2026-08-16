@@ -2,6 +2,8 @@ import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { DEFAULT_ACADEMIC_CLASSES } from './academicServices.js';
 import {
+  ACTIVITY_STATUSES,
+  getActivityStatus,
   MAX_ACTIVITY_INSTRUCTIONS_LENGTH,
   validateActivity,
   validateActivityResourceFile
@@ -63,5 +65,18 @@ describe('activity support resource', () => {
     assert.throws(() => validateActivityResourceFile({ name: 'material.pdf', size: 2048 }), /extensão \.zip/);
     assert.throws(() => validateActivityResourceFile({ name: 'material.zip', size: 0 }), /vazio/);
     assert.throws(() => validateActivityResourceFile({ name: 'material.zip', size: 6 * 1024 * 1024 }), /máximo 5 MB/);
+  });
+});
+
+
+describe('activity status', () => {
+  it('distinguishes active and reversibly inactive activities', () => {
+    assert.equal(getActivityStatus({ active: true, deleted: false }), ACTIVITY_STATUSES.ACTIVE);
+    assert.equal(getActivityStatus({ active: false, deleted: false }), ACTIVITY_STATUSES.INACTIVE);
+  });
+
+  it('prioritizes the archived state over the active flag', () => {
+    assert.equal(getActivityStatus({ active: true, deleted: true }), ACTIVITY_STATUSES.ARCHIVED);
+    assert.equal(getActivityStatus({ active: false, deleted: true }), ACTIVITY_STATUSES.ARCHIVED);
   });
 });

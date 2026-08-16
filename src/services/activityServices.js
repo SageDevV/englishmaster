@@ -34,3 +34,16 @@ export function validateActivityResourceFile(file = {}) {
     contentType: 'application/zip'
   };
 }
+
+
+
+export const ACTIVITY_STATUSES = Object.freeze({
+  ACTIVE: 'active',
+  INACTIVE: 'inactive',
+  ARCHIVED: 'archived'
+});
+
+export function getActivityStatus(activity = {}) {
+  if (activity.deleted === true) return ACTIVITY_STATUSES.ARCHIVED;
+  return activity.active === true ? ACTIVITY_STATUSES.ACTIVE : ACTIVITY_STATUSES.INACTIVE;
+}

@@ -5915,3 +5915,38 @@ body[data-module="newsletter"] .bg-animate::before {
   .activity-support-resource .attached-file-icon { width: 44px; height: 44px; }
   .activity-support-resource .download-attachment-btn { grid-column: 1 / -1; width: 100%; }
 }
+
+
+
+/* --- Ativação reversível de atividades --- */
+.teacher-activity-card.inactive {
+  border-style: dashed;
+  border-color: rgba(245, 158, 11, 0.28);
+  background: rgba(245, 158, 11, 0.025);
+}
+
+.teacher-activity-card.active {
+  border-color: rgba(16, 185, 129, 0.22);
+}
+
+.activity-status-line,
+.activity-management-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.activity-status-line { justify-content: flex-end; }
+.activity-status-line .exam-status-badge { white-space: nowrap; }
+.activity-management-actions { justify-content: flex-end; }
+.activity-management-actions .delete-exam-btn { margin-left: 0; }
+.activity-management-actions button { white-space: nowrap; }
+
+@media (max-width: 640px) {
+  .activity-card-topline,
+  .activity-card-actions { align-items: stretch; flex-direction: column; }
+  .activity-status-line,
+  .activity-management-actions { justify-content: flex-start; }
+  .activity-management-actions button { flex: 1 1 auto; }
+}

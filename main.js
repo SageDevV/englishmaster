@@ -56,6 +56,8 @@ import {
   validateStudyReference
 } from './src/services/academicServices.js';
 import {
+  ACTIVITY_STATUSES,
+  getActivityStatus,
   validateActivity,
   validateActivityResourceFile
 } from './src/services/activityServices.js';
@@ -744,6 +746,23 @@ async function downloadActivityResourceOnFreeTier(activity) {
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
   return { ok: true, fileName: metadata.fileName };
+}
+
+async function setActivityActiveOnFreeTier(activityId, active) {
+  if (!isAdmin()) throw new Error('Área exclusiva do professor.');
+  const activityRef = db.collection('activities').doc(String(activityId || ''));
+  const activityDoc = await activityRef.get();
+  if (!activityDoc.exists || activityDoc.data().deleted === true) {
+    throw new Error('Atividade não encontrada ou já arquivada.');
+  }
+  if (activityDoc.data().active === active) return { ok: true };
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  await activityRef.update({
+    active,
+    ...(active ? { activatedAt: serverTimestamp } : { deactivatedAt: serverTimestamp }),
+    updatedAt: serverTimestamp
+  });
+  return { ok: true };
 }
 
 async function archiveActivityOnFreeTier(activityId) {
@@ -3203,6 +3222,38 @@ function renderTeacherActivityCreator() {
   `;
 }
 
+function renderTeacherActivityCard(activity) {
+  const status = getActivityStatus(activity);
+  const statusLabel = status === ACTIVITY_STATUSES.ACTIVE
+    ? 'Ativa para alunos'
+    : status === ACTIVITY_STATUSES.INACTIVE
+      ? '🔒 Desativada'
+      : 'Arquivada';
+  const actions = status === ACTIVITY_STATUSES.ARCHIVED
+    ? '<span class="activity-archived-label">Somente consulta</span>'
+    : `
+      <div class="activity-management-actions">
+        ${status === ACTIVITY_STATUSES.ACTIVE
+          ? `<button type="button" class="deactivate-exam-btn" onclick="window.deactivateActivity('${activity.id}')">Desativar</button>`
+          : `<button type="button" class="publish-exam-btn" onclick="window.activateActivity('${activity.id}')">Ativar</button>`}
+        <button type="button" class="delete-exam-btn" onclick="window.archiveActivity('${activity.id}')">Arquivar</button>
+      </div>
+    `;
+  return `
+    <article class="teacher-activity-card ${status}">
+      <div class="activity-card-topline">
+        <span>${escapeHtml(activity.subjectName)}</span>
+        <div class="activity-status-line"><small>${escapeHtml(activity.className)}</small><span class="exam-status-badge ${status === ACTIVITY_STATUSES.ACTIVE ? 'active' : 'inactive'}">${statusLabel}</span></div>
+      </div>
+      <h3>${escapeHtml(activity.title)}</h3>
+      <p>${escapeHtml(activity.instructions)}</p>
+      ${renderActivityResource(activity)}
+      <div class="activity-card-actions"><strong>${activity.submissions.length} entrega(s)</strong>${actions}</div>
+      ${renderActivitySubmissionRows(activity.submissions)}
+    </article>
+  `;
+}
+
 function renderTeacherActivities() {
   const mainContent = document.getElementById('main-content');
   if (state.activitiesStatus === 'idle') {
@@ -3218,22 +3269,13 @@ function renderTeacherActivities() {
     : state.activitiesStatus === 'error'
       ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.activitiesMessage)}</p><button class="next-btn" onclick="window.refreshActivities()">Tentar novamente</button></div>`
       : state.activities.length
-        ? `<div class="teacher-activity-list">${state.activities.map(activity => `
-            <article class="teacher-activity-card ${activity.deleted ? 'archived' : ''}">
-              <div class="activity-card-topline"><span>${escapeHtml(activity.subjectName)}</span><small>${escapeHtml(activity.className)} · ${activity.deleted ? 'Arquivada' : 'Ativa'}</small></div>
-              <h3>${escapeHtml(activity.title)}</h3>
-              <p>${escapeHtml(activity.instructions)}</p>
-              ${renderActivityResource(activity)}
-              <div class="activity-card-actions"><strong>${activity.submissions.length} entrega(s)</strong>${activity.deleted ? '<span class="activity-archived-label">Somente consulta</span>' : `<button type="button" class="delete-exam-btn" onclick="window.archiveActivity('${activity.id}')">Arquivar</button>`}</div>
-              ${renderActivitySubmissionRows(activity.submissions)}
-            </article>
-          `).join('')}</div>`
+        ? `<div class="teacher-activity-list">${state.activities.map(renderTeacherActivityCard).join('')}</div>`
         : '<div class="exam-empty"><div class="empty-icon">⇧</div><h3>Nenhuma atividade cadastrada</h3><p>Cadastre a primeira atividade para disponibilizá-la aos alunos.</p><button class="next-btn" onclick="window.navigateTo(\'teacher-activity-create\')">Cadastrar atividade</button></div>';
 
   mainContent.innerHTML = `
     <section class="exam-page activities-management-page">
       <div class="exam-page-heading results-heading">
-        <div><span class="eyebrow">Área do professor</span><h2>Atividades cadastradas</h2><p>Visualize atividades, acompanhe as entregas em ZIP e arquive publicações.</p></div>
+        <div><span class="eyebrow">Área do professor</span><h2>Atividades cadastradas</h2><p>Visualize, ative, desative, acompanhe entregas em ZIP ou arquive atividades.</p></div>
         <button class="secondary-btn" onclick="window.refreshActivities()">Atualizar lista</button>
       </div>
       ${state.activitiesMessage && state.activitiesStatus !== 'error' ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
@@ -5577,6 +5619,31 @@ window.submitActivity = async event => {
     state.teacherActivitySubmitting = false;
   }
   renderTeacherActivityCreator();
+};
+
+window.activateActivity = async activityId => {
+  state.activitiesMessage = '';
+  try {
+    await setActivityActiveOnFreeTier(activityId, true);
+    state.activitiesMessage = 'Atividade ativada. Ela já está disponível para os alunos da turma.';
+    await loadActivities();
+  } catch (error) {
+    state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível ativar a atividade.')}`;
+  }
+  renderTeacherActivities();
+};
+
+window.deactivateActivity = async activityId => {
+  if (!window.confirm('Desativar esta atividade? Ela deixará de aparecer e de aceitar novas entregas, mas os arquivos já recebidos serão preservados.')) return;
+  state.activitiesMessage = '';
+  try {
+    await setActivityActiveOnFreeTier(activityId, false);
+    state.activitiesMessage = 'Atividade desativada. Entregas e material de apoio foram preservados.';
+    await loadActivities();
+  } catch (error) {
+    state.activitiesMessage = `Erro: ${getFriendlyError(error, 'Não foi possível desativar a atividade.')}`;
+  }
+  renderTeacherActivities();
 };
 
 window.archiveActivity = async activityId => {
