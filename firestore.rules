@@ -348,6 +348,86 @@ service cloud.firestore {
         && request.resource.data.updatedAt == request.time;
     }
 
+    function validProjectTechnologies(technologies) {
+      return technologies is list
+        && technologies.size() >= 1
+        && technologies.size() <= 8
+        && technologies[0] is string
+        && technologies[0].size() >= 1
+        && technologies[0].size() <= 30
+        && (technologies.size() < 2 || (technologies[1] is string && technologies[1].size() >= 1 && technologies[1].size() <= 30))
+        && (technologies.size() < 3 || (technologies[2] is string && technologies[2].size() >= 1 && technologies[2].size() <= 30))
+        && (technologies.size() < 4 || (technologies[3] is string && technologies[3].size() >= 1 && technologies[3].size() <= 30))
+        && (technologies.size() < 5 || (technologies[4] is string && technologies[4].size() >= 1 && technologies[4].size() <= 30))
+        && (technologies.size() < 6 || (technologies[5] is string && technologies[5].size() >= 1 && technologies[5].size() <= 30))
+        && (technologies.size() < 7 || (technologies[6] is string && technologies[6].size() >= 1 && technologies[6].size() <= 30))
+        && (technologies.size() < 8 || (technologies[7] is string && technologies[7].size() >= 1 && technologies[7].size() <= 30));
+    }
+
+    function validProjectShowcaseCreate() {
+      let data = request.resource.data;
+      let profile = get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile;
+      return !isAdmin()
+        && profile.completed == true
+        && data.keys().hasOnly([
+          'title', 'description', 'projectUrl', 'repositoryUrl', 'technologies',
+          'authorId', 'authorName', 'authorClassId', 'authorClassName',
+          'active', 'deleted', 'createdAt', 'updatedAt'
+        ])
+        && data.authorId == request.auth.uid
+        && data.authorName == profile.fullName
+        && data.authorClassName == profile.className
+        && ((profile.keys().hasAny(['classId']) && data.authorClassId == profile.classId)
+          || (!profile.keys().hasAny(['classId']) && data.authorClassId == ''))
+        && data.title is string
+        && data.title.size() >= 3
+        && data.title.size() <= 120
+        && data.description is string
+        && data.description.size() >= 20
+        && data.description.size() <= 1200
+        && data.projectUrl is string
+        && data.repositoryUrl is string
+        && data.projectUrl.size() <= 2048
+        && data.repositoryUrl.size() <= 2048
+        && (data.projectUrl.size() > 0 || data.repositoryUrl.size() > 0)
+        && (data.projectUrl == '' || data.projectUrl.matches('https?://.*'))
+        && (data.repositoryUrl == '' || data.repositoryUrl.matches('https?://.*'))
+        && validProjectTechnologies(data.technologies)
+        && data.active == true
+        && data.deleted == false
+        && data.createdAt is timestamp
+        && data.createdAt == request.time
+        && data.updatedAt is timestamp
+        && data.updatedAt == request.time;
+    }
+
+    function validProjectShowcaseArchive() {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return (resource.data.authorId == request.auth.uid || isAdmin())
+        && request.resource.data.keys().hasOnly([
+          'title', 'description', 'projectUrl', 'repositoryUrl', 'technologies',
+          'authorId', 'authorName', 'authorClassId', 'authorClassName',
+          'active', 'deleted', 'createdAt', 'updatedAt', 'deletedAt'
+        ])
+        && request.resource.data.title == resource.data.title
+        && request.resource.data.description == resource.data.description
+        && request.resource.data.projectUrl == resource.data.projectUrl
+        && request.resource.data.repositoryUrl == resource.data.repositoryUrl
+        && request.resource.data.technologies == resource.data.technologies
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.authorName == resource.data.authorName
+        && request.resource.data.authorClassId == resource.data.authorClassId
+        && request.resource.data.authorClassName == resource.data.authorClassName
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.active == false
+        && request.resource.data.deleted == true
+        && request.resource.data.deletedAt is timestamp
+        && request.resource.data.deletedAt == request.time
+        && request.resource.data.updatedAt is timestamp
+        && request.resource.data.updatedAt == request.time
+        && changed.hasOnly(['active', 'deleted', 'deletedAt', 'updatedAt']);
+    }
+
     function canDeleteAttachment(data) {
       let attempt = get(/databases/$(database)/documents/examAttempts/$(data.attemptId));
       return data.userId == request.auth.uid
@@ -389,6 +469,15 @@ service cloud.firestore {
             || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
               && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.className == resource.data.className)));
       allow create, update: if isAdmin();
+      allow delete: if false;
+    }
+
+    match /projectShowcase/{projectId} {
+      allow read: if signedIn()
+        && resource.data.active == true
+        && resource.data.deleted == false;
+      allow create: if signedIn() && validProjectShowcaseCreate();
+      allow update: if signedIn() && validProjectShowcaseArchive();
       allow delete: if false;
     }
 

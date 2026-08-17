@@ -15,6 +15,7 @@ O antigo aplicativo principal foi preservado como o submódulo **English Master*
 | --- | --- | --- |
 | `#/` | `hub` | Dashboard principal do Magister Hub |
 | `#/english-master` | `english-master` | Submódulo de aprendizagem de inglês |
+| `#/projetos` | `projects` | Vitrine de trabalhos publicados pelos alunos |
 | `#/cadastro-do-aluno` | `student-registration` | Cadastro global, disponível somente para alunos |
 | `#/referencias-de-estudo` | `student-references` | Referências publicadas para a turma do aluno |
 | `https://codeescape-c9e1b.web.app/` | externo | CodeScape, escape room de algoritmos, aberto em nova guia |
@@ -39,6 +40,7 @@ O CodeScape é um submódulo hospedado externamente. Seu link fica em `updateHea
 - `renderTeacherAcademics()`: gestão de turmas e matérias.
 - `renderTeacherReferences()`: publicação e arquivamento de materiais de estudo.
 - `renderEnglishMaster()`: página inicial do submódulo English Master.
+- `renderProjectShowcase()`: publicação e descoberta de projetos dos alunos.
 - `renderApp()`: resolve a view atual e chama o renderizador correspondente.
 - `updateHeader()`: navegação compartilhada entre Hub, submódulos e ferramentas.
 

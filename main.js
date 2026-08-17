@@ -80,6 +80,12 @@ import {
   NEWSLETTER_SOURCES
 } from './src/services/newsletterServices.js';
 import {
+  filterProjectShowcase,
+  getProjectTechnologyOptions,
+  MAX_PROJECT_DESCRIPTION_LENGTH,
+  validateProjectSubmission
+} from './src/services/projectShowcaseServices.js';
+import {
   buildTeacherPerformanceDashboard,
   buildTeacherStudentGroups,
   filterTeacherResults,
@@ -470,6 +476,82 @@ async function loadCommunityPosts() {
     state.communityPosts = [];
     state.communityStatus = 'error';
     state.communityMessage = getFriendlyError(error, 'Não foi possível carregar a Comunidade.');
+  }
+}
+
+function serializeProjectShowcase(doc) {
+  const data = doc.data();
+  return {
+    id: doc.id,
+    title: data.title || '',
+    description: data.description || '',
+    projectUrl: data.projectUrl || '',
+    repositoryUrl: data.repositoryUrl || '',
+    technologies: Array.isArray(data.technologies)
+      ? data.technologies.filter(item => typeof item === 'string').slice(0, 8)
+      : [],
+    authorId: data.authorId || '',
+    authorName: data.authorName || 'Aluno',
+    authorClassId: data.authorClassId || '',
+    authorClassName: data.authorClassName || '',
+    active: data.active !== false,
+    deleted: data.deleted === true,
+    createdAtMillis: timestampToMillis(data.createdAt),
+    updatedAtMillis: timestampToMillis(data.updatedAt)
+  };
+}
+
+async function createProjectShowcaseOnFreeTier(data) {
+  if (isAdmin()) throw new Error('A publicação de projetos é exclusiva para alunos.');
+  const profile = state.userStats.studentProfile || {};
+  if (!isStudentProfileComplete(profile)) throw new Error('Complete seu cadastro de aluno antes de publicar.');
+  const project = validateProjectSubmission(data);
+  const classId = profile.classId || getProfileClassId(profile, state.academicClasses);
+  const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+  const docRef = await db.collection('projectShowcase').add({
+    ...project,
+    authorId: state.user.uid,
+    authorName: profile.fullName,
+    authorClassId: classId || '',
+    authorClassName: profile.className || '',
+    active: true,
+    deleted: false,
+    createdAt: serverTimestamp,
+    updatedAt: serverTimestamp
+  });
+  return { ok: true, id: docRef.id };
+}
+
+async function archiveProjectShowcaseOnFreeTier(projectId) {
+  const project = state.projectShowcase.find(item => item.id === String(projectId || ''));
+  if (!project) throw new Error('Projeto não encontrado.');
+  if (!isAdmin() && project.authorId !== state.user.uid) throw new Error('Você só pode remover seus próprios projetos.');
+  await db.collection('projectShowcase').doc(project.id).update({
+    active: false,
+    deleted: true,
+    deletedAt: firebase.firestore.FieldValue.serverTimestamp(),
+    updatedAt: firebase.firestore.FieldValue.serverTimestamp()
+  });
+  return { ok: true };
+}
+
+async function loadProjectShowcase() {
+  if (!state.user) return;
+  state.projectShowcaseStatus = 'loading';
+  try {
+    const snapshot = await db.collection('projectShowcase')
+      .where('active', '==', true)
+      .where('deleted', '==', false)
+      .get();
+    state.projectShowcase = snapshot.docs
+      .map(serializeProjectShowcase)
+      .sort((a, b) => (b.createdAtMillis || b.updatedAtMillis) - (a.createdAtMillis || a.updatedAtMillis));
+    state.projectShowcaseStatus = 'ready';
+  } catch (error) {
+    console.error('Erro ao carregar vitrine de projetos:', error);
+    state.projectShowcase = [];
+    state.projectShowcaseStatus = 'error';
+    state.projectShowcaseMessage = getFriendlyError(error, 'Não foi possível carregar os projetos.');
   }
 }
 
@@ -1886,6 +1968,17 @@ const state = {
   newsletterSource: 'all',
   newsletterCategory: 'Todos',
   newsletterSort: 'recent',
+  projectShowcase: [],
+  projectShowcaseStatus: 'idle',
+  projectShowcaseMessage: '',
+  projectShowcaseSearch: '',
+  projectShowcaseTechnology: 'Todos',
+  projectShowcaseSort: 'recent',
+  projectDraftTitle: '',
+  projectDraftDescription: '',
+  projectDraftUrl: '',
+  projectDraftRepositoryUrl: '',
+  projectDraftTechnologies: '',
   teacherReferenceTitle: '',
   teacherReferenceDescription: '',
   teacherReferenceUrl: '',
@@ -2007,6 +2100,17 @@ auth.onAuthStateChanged(async (user) => {
       state.newsletterSource = 'all';
       state.newsletterCategory = 'Todos';
       state.newsletterSort = 'recent';
+      state.projectShowcase = [];
+      state.projectShowcaseStatus = 'idle';
+      state.projectShowcaseMessage = '';
+      state.projectShowcaseSearch = '';
+      state.projectShowcaseTechnology = 'Todos';
+      state.projectShowcaseSort = 'recent';
+      state.projectDraftTitle = '';
+      state.projectDraftDescription = '';
+      state.projectDraftUrl = '';
+      state.projectDraftRepositoryUrl = '';
+      state.projectDraftTechnologies = '';
       state.activities = [];
       state.activitiesStatus = 'idle';
       state.activitiesMessage = '';
@@ -2424,6 +2528,7 @@ const viewRoutes = {
   hub: '#/',
   community: '#/comunidade',
   newsletter: '#/newsletter',
+  projects: '#/projetos',
   'english-master': '#/english-master',
   'student-registration': '#/cadastro-do-aluno',
   'student-references': '#/referencias-de-estudo',
@@ -2483,6 +2588,10 @@ window.navigateTo = view => {
     state.communityStatus = 'idle';
     state.communityMessage = '';
   }
+  if (view === 'projects') {
+    state.projectShowcaseStatus = 'idle';
+    state.projectShowcaseMessage = '';
+  }
   if (view === 'teacher-references' || view === 'student-references') {
     state.referencesStatus = 'idle';
     state.referencesMessage = '';
@@ -2520,24 +2629,35 @@ function isEnglishMasterView() {
 function applyViewTheme() {
   const englishMasterActive = isEnglishMasterView();
   const newsletterActive = state.currentView === 'newsletter';
+  const projectsActive = state.currentView === 'projects';
   const communityActive = state.currentView === 'community';
-  document.body.dataset.module = englishMasterActive ? 'english-master' : (newsletterActive ? 'newsletter' : 'hub');
+  document.body.dataset.module = englishMasterActive
+    ? 'english-master'
+    : newsletterActive
+      ? 'newsletter'
+      : projectsActive
+        ? 'projects'
+        : 'hub';
   document.title = englishMasterActive
     ? 'English Master | Magister Hub'
     : newsletterActive
       ? 'Newsletter Dev | Magister Hub'
-      : communityActive
-        ? 'Comunidade | Magister Hub'
-        : 'Magister Hub';
+      : projectsActive
+        ? 'Vitrine de Projetos | Magister Hub'
+        : communityActive
+          ? 'Comunidade | Magister Hub'
+          : 'Magister Hub';
   const subtitle = document.querySelector('header > p');
   if (subtitle) {
     subtitle.textContent = englishMasterActive
       ? 'English Master · Aprendizado interativo de inglês'
       : newsletterActive
         ? 'Newsletter Dev · Curadoria das comunidades de tecnologia'
-        : communityActive
-          ? 'Comunidade · Conteúdos do professor para sua turma'
-          : 'Magister Hub · Seu hub de ferramentas educacionais';
+        : projectsActive
+          ? 'Vitrine de Projetos · Trabalhos criados pelos alunos'
+          : communityActive
+            ? 'Comunidade · Conteúdos do professor para sua turma'
+            : 'Magister Hub · Seu hub de ferramentas educacionais';
   }
 }
 
@@ -2552,6 +2672,7 @@ function renderApp() {
   if (state.currentView === 'hub') renderHubHome();
   else if (state.currentView === 'community') renderCommunity();
   else if (state.currentView === 'newsletter') renderNewsletter();
+  else if (state.currentView === 'projects') renderProjectShowcase();
   else if (state.currentView === 'english-master') renderEnglishMaster();
   else if (state.currentView === 'student-registration' && !isAdmin()) renderStudentRegistration();
   else if (state.currentView === 'student-references' && !isAdmin()) renderStudentReferences();
@@ -2635,6 +2756,7 @@ function updateHeader() {
       <button class="nav-btn ${state.currentView === 'hub' ? 'active' : ''}" onclick="window.navigateTo('hub')">Hub</button>
       <button class="nav-btn ${state.currentView === 'community' ? 'active' : ''}" onclick="window.navigateTo('community')">Comunidade</button>
       <button class="nav-btn ${state.currentView === 'newsletter' ? 'active' : ''}" onclick="window.navigateTo('newsletter')">Newsletter</button>
+      <button class="nav-btn ${state.currentView === 'projects' ? 'active' : ''}" onclick="window.navigateTo('projects')">Projetos</button>
       <button class="nav-btn ${isEnglishMasterView() ? 'active' : ''}" onclick="window.navigateTo('english-master')">English Master</button>
       <a class="nav-btn external-nav-btn" href="https://codeescape-c9e1b.web.app/" target="_blank" rel="noopener noreferrer" aria-label="Abrir CodeScape em uma nova guia">CodeScape <span aria-hidden="true">↗</span></a>
     </nav>
@@ -2857,6 +2979,198 @@ window.refreshCommunity = () => {
   state.communityStatus = 'idle';
   state.communityMessage = '';
   renderCommunity();
+};
+
+function renderProjectShowcaseComposer() {
+  const profile = state.userStats.studentProfile || {};
+  if (isAdmin()) return '';
+  if (!isStudentProfileComplete(profile)) {
+    return `<div class="project-profile-notice"><div><strong>Complete seu cadastro para publicar</strong><p>Seu nome e sua turma serão exibidos junto ao projeto.</p></div><button class="next-btn" onclick="window.navigateTo('student-registration')">Completar cadastro</button></div>`;
+  }
+  return `
+    <section class="project-composer" aria-labelledby="project-composer-title">
+      <div class="project-composer-heading">
+        <span class="project-composer-icon" aria-hidden="true">＋</span>
+        <div><span>DIVULGUE SEU TRABALHO</span><h2 id="project-composer-title">Adicionar projeto à vitrine</h2><p>Compartilhe o resultado com outros alunos e com o professor.</p></div>
+      </div>
+      <form class="project-composer-form" onsubmit="window.submitProjectShowcase(event)">
+        <label class="exam-field project-title-field"><span>Nome do projeto</span><input required minlength="3" maxlength="120" value="${escapeHtml(state.projectDraftTitle)}" oninput="window.updateProjectDraft('title', this.value)" placeholder="Ex.: Organizador de estudos" /></label>
+        <label class="exam-field project-tech-field"><span>Tecnologias <small>(separadas por vírgula)</small></span><input required maxlength="247" value="${escapeHtml(state.projectDraftTechnologies)}" oninput="window.updateProjectDraft('technologies', this.value)" placeholder="JavaScript, CSS, Firebase" /></label>
+        <label class="exam-field project-description-field"><span>Sobre o projeto</span><textarea required minlength="20" maxlength="${MAX_PROJECT_DESCRIPTION_LENGTH}" rows="5" oninput="window.updateProjectDraft('description', this.value)" placeholder="Conte o problema que seu projeto resolve e como ele foi desenvolvido...">${escapeHtml(state.projectDraftDescription)}</textarea><small><span id="project-description-count">${state.projectDraftDescription.length}</span>/${MAX_PROJECT_DESCRIPTION_LENGTH} caracteres</small></label>
+        <label class="exam-field"><span>Link do projeto <small>(opcional)</small></span><input type="url" maxlength="2048" value="${escapeHtml(state.projectDraftUrl)}" oninput="window.updateProjectDraft('projectUrl', this.value)" placeholder="https://meu-projeto.web.app" /></label>
+        <label class="exam-field"><span>Repositório <small>(opcional)</small></span><input type="url" maxlength="2048" value="${escapeHtml(state.projectDraftRepositoryUrl)}" oninput="window.updateProjectDraft('repositoryUrl', this.value)" placeholder="https://github.com/usuario/projeto" /></label>
+        <div class="project-form-hint">Informe pelo menos um dos links acima.</div>
+        <button class="next-btn project-publish-btn" type="submit"><span aria-hidden="true">↑</span> Publicar projeto</button>
+      </form>
+    </section>
+  `;
+}
+
+function renderProjectShowcaseCard(project) {
+  const canArchive = isAdmin() || project.authorId === state.user.uid;
+  const initials = getCommunityAuthorInitials(project.authorName);
+  return `
+    <article class="project-showcase-card">
+      <div class="project-card-accent" aria-hidden="true"></div>
+      <div class="project-card-author">
+        <span class="project-author-avatar" aria-hidden="true">${escapeHtml(initials)}</span>
+        <span><strong>${escapeHtml(project.authorName)}</strong><small>Aluno${project.authorClassName ? ` · ${escapeHtml(project.authorClassName)}` : ''}</small></span>
+        <time>${escapeHtml(formatCommunityDate(project.createdAtMillis || project.updatedAtMillis))}</time>
+      </div>
+      <div class="project-card-copy"><h3>${escapeHtml(project.title)}</h3><p>${escapeHtml(project.description)}</p></div>
+      <div class="project-technologies">${project.technologies.map(technology => `<span>${escapeHtml(technology)}</span>`).join('')}</div>
+      <div class="project-card-footer">
+        <div class="project-card-links">
+          ${project.projectUrl ? `<a href="${escapeHtml(getSafeExternalUrl(project.projectUrl))}" target="_blank" rel="noopener noreferrer">Ver projeto <span aria-hidden="true">↗</span></a>` : ''}
+          ${project.repositoryUrl ? `<a class="repository-link" href="${escapeHtml(getSafeExternalUrl(project.repositoryUrl))}" target="_blank" rel="noopener noreferrer">Repositório <span aria-hidden="true">↗</span></a>` : ''}
+        </div>
+        ${canArchive ? `<button type="button" onclick="window.archiveProjectShowcase('${project.id}')">${isAdmin() ? 'Remover da vitrine' : 'Remover meu projeto'}</button>` : ''}
+      </div>
+    </article>
+  `;
+}
+
+function getFilteredProjectShowcase() {
+  return filterProjectShowcase(state.projectShowcase, {
+    search: state.projectShowcaseSearch,
+    technology: state.projectShowcaseTechnology,
+    sort: state.projectShowcaseSort
+  });
+}
+
+function renderProjectShowcaseResults() {
+  if (state.projectShowcaseStatus === 'loading') {
+    return '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando projetos dos alunos...</p></div>';
+  }
+  if (state.projectShowcaseStatus === 'error') {
+    return `<div class="exam-empty"><h3>Não foi possível carregar a vitrine</h3><p>${escapeHtml(state.projectShowcaseMessage)}</p><button class="next-btn" onclick="window.refreshProjectShowcase()">Tentar novamente</button></div>`;
+  }
+  const projects = getFilteredProjectShowcase();
+  if (!projects.length) {
+    return `<div class="project-showcase-empty"><span aria-hidden="true">◇</span><h3>Nenhum projeto encontrado</h3><p>${state.projectShowcase.length ? 'Altere a busca ou os filtros selecionados.' : 'A vitrine está pronta para receber o primeiro trabalho dos alunos.'}</p>${state.projectShowcase.length ? '<button class="secondary-btn" onclick="window.clearProjectShowcaseFilters()">Limpar filtros</button>' : ''}</div>`;
+  }
+  return `<div class="project-showcase-grid">${projects.map(renderProjectShowcaseCard).join('')}</div>`;
+}
+
+function updateProjectShowcaseResults() {
+  const region = document.querySelector('.project-showcase-results');
+  if (region) region.innerHTML = renderProjectShowcaseResults();
+  const count = document.querySelector('[data-project-count]');
+  if (count) count.textContent = String(getFilteredProjectShowcase().length);
+}
+
+function renderProjectShowcase() {
+  const mainContent = document.getElementById('main-content');
+  if (state.projectShowcaseStatus === 'idle') {
+    state.projectShowcaseStatus = 'loading';
+    queueMicrotask(async () => {
+      await loadProjectShowcase();
+      if (state.currentView === 'projects') renderProjectShowcase();
+    });
+  }
+  const technologies = getProjectTechnologyOptions(state.projectShowcase);
+  if (state.projectShowcaseTechnology !== 'Todos' && !technologies.includes(state.projectShowcaseTechnology)) {
+    state.projectShowcaseTechnology = 'Todos';
+  }
+  const projectCount = getFilteredProjectShowcase().length;
+  mainContent.innerHTML = `
+    <section class="project-showcase-page">
+      <div class="project-showcase-hero">
+        <div><span class="project-showcase-eyebrow">VITRINE DE PROJETOS</span><h1>Ideias que saíram do papel.</h1><p>Conheça trabalhos desenvolvidos pelos alunos, descubra novas tecnologias e compartilhe aquilo que você construiu.</p><div class="project-hero-audience"><span>Alunos publicam</span><span>Todos aprendem</span><span>Professores acompanham</span></div></div>
+        <div class="project-hero-art" aria-hidden="true"><span>&lt;/&gt;</span><strong>BUILD</strong><small>LEARN · SHARE</small></div>
+      </div>
+      ${state.projectShowcaseMessage && state.projectShowcaseStatus !== 'error' ? `<div class="exam-alert ${state.projectShowcaseMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.projectShowcaseMessage)}</div>` : ''}
+      ${renderProjectShowcaseComposer()}
+      <div class="project-showcase-heading"><div><span>PROJETOS DA COMUNIDADE</span><h2>Explore a vitrine</h2><p>Trabalhos compartilhados com alunos e professores da plataforma.</p></div><button class="secondary-btn" onclick="window.refreshProjectShowcase()">Atualizar vitrine</button></div>
+      <div class="project-showcase-controls">
+        <label class="newsletter-search"><span aria-hidden="true">⌕</span><span class="sr-only">Buscar projetos</span><input type="search" maxlength="80" value="${escapeHtml(state.projectShowcaseSearch)}" oninput="window.updateProjectShowcaseSearch(this.value)" placeholder="Busque por projeto, aluno ou tecnologia..." /></label>
+        <label class="newsletter-select-control"><span>Tecnologia</span><select onchange="window.setProjectShowcaseFilter('technology', this.value)"><option value="Todos">Todas</option>${technologies.map(technology => `<option value="${escapeHtml(technology)}" ${state.projectShowcaseTechnology === technology ? 'selected' : ''}>${escapeHtml(technology)}</option>`).join('')}</select></label>
+        <label class="newsletter-select-control"><span>Ordenar</span><select onchange="window.setProjectShowcaseFilter('sort', this.value)"><option value="recent" ${state.projectShowcaseSort === 'recent' ? 'selected' : ''}>Mais recentes</option><option value="title" ${state.projectShowcaseSort === 'title' ? 'selected' : ''}>Título A–Z</option></select></label>
+      </div>
+      <div class="project-showcase-summary"><span><strong data-project-count>${projectCount}</strong> ${projectCount === 1 ? 'projeto encontrado' : 'projetos encontrados'}</span><small>Links abrem em uma nova guia</small></div>
+      <div class="project-showcase-results">${renderProjectShowcaseResults()}</div>
+    </section>
+  `;
+}
+
+window.updateProjectDraft = (field, value) => {
+  const fields = {
+    title: 'projectDraftTitle',
+    description: 'projectDraftDescription',
+    projectUrl: 'projectDraftUrl',
+    repositoryUrl: 'projectDraftRepositoryUrl',
+    technologies: 'projectDraftTechnologies'
+  };
+  if (!fields[field]) return;
+  state[fields[field]] = String(value || '');
+  if (field === 'description') {
+    const counter = document.getElementById('project-description-count');
+    if (counter) counter.textContent = String(state.projectDraftDescription.length);
+  }
+};
+
+window.submitProjectShowcase = async event => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  if (button) button.disabled = true;
+  state.projectShowcaseMessage = '';
+  try {
+    await createProjectShowcaseOnFreeTier({
+      title: state.projectDraftTitle,
+      description: state.projectDraftDescription,
+      projectUrl: state.projectDraftUrl,
+      repositoryUrl: state.projectDraftRepositoryUrl,
+      technologies: state.projectDraftTechnologies
+    });
+    state.projectDraftTitle = '';
+    state.projectDraftDescription = '';
+    state.projectDraftUrl = '';
+    state.projectDraftRepositoryUrl = '';
+    state.projectDraftTechnologies = '';
+    await loadProjectShowcase();
+    state.projectShowcaseMessage = 'Projeto publicado com sucesso.';
+  } catch (error) {
+    state.projectShowcaseMessage = `Erro: ${getFriendlyError(error, 'Não foi possível publicar o projeto.')}`;
+  }
+  renderProjectShowcase();
+};
+
+window.archiveProjectShowcase = async projectId => {
+  const action = isAdmin() ? 'remover este projeto da vitrine' : 'remover seu projeto da vitrine';
+  if (!window.confirm(`Deseja ${action}?`)) return;
+  state.projectShowcaseMessage = '';
+  try {
+    await archiveProjectShowcaseOnFreeTier(projectId);
+    await loadProjectShowcase();
+    state.projectShowcaseMessage = 'Projeto removido da vitrine.';
+  } catch (error) {
+    state.projectShowcaseMessage = `Erro: ${getFriendlyError(error, 'Não foi possível remover o projeto.')}`;
+  }
+  renderProjectShowcase();
+};
+
+window.updateProjectShowcaseSearch = value => {
+  state.projectShowcaseSearch = String(value || '').slice(0, 80);
+  updateProjectShowcaseResults();
+};
+
+window.setProjectShowcaseFilter = (kind, value) => {
+  if (kind === 'technology') state.projectShowcaseTechnology = String(value || 'Todos');
+  if (kind === 'sort' && ['recent', 'title'].includes(value)) state.projectShowcaseSort = value;
+  renderProjectShowcase();
+};
+
+window.clearProjectShowcaseFilters = () => {
+  state.projectShowcaseSearch = '';
+  state.projectShowcaseTechnology = 'Todos';
+  state.projectShowcaseSort = 'recent';
+  renderProjectShowcase();
+};
+
+window.refreshProjectShowcase = () => {
+  state.projectShowcaseStatus = 'idle';
+  state.projectShowcaseMessage = '';
+  renderProjectShowcase();
 };
 
 function formatNewsletterDate(value) {
@@ -3099,6 +3413,22 @@ function renderHubHome() {
   const blockedExamCount = state.studentExams.filter(exam => !exam.active).length;
   const activeExamCount = state.studentExams.filter(exam => exam.active).length;
   const modules = [
+    {
+      view: 'newsletter',
+      icon: '⌁',
+      kicker: 'Radar de tecnologia',
+      title: 'Newsletter Dev',
+      description: 'Acompanhe artigos, notícias e discussões das comunidades de desenvolvimento.'
+    },
+    {
+      view: 'projects',
+      icon: '◇',
+      kicker: 'Talentos da plataforma',
+      title: 'Vitrine de projetos',
+      description: isAdmin()
+        ? 'Conheça os trabalhos publicados pelos alunos e acompanhe suas criações.'
+        : 'Divulgue seus trabalhos e conheça projetos criados por outros alunos.'
+    },
     ...(isAdmin() ? [
       {
         view: 'teacher-academics',
