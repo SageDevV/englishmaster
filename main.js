@@ -28,7 +28,7 @@ import {
   EXAM_QUESTION_TYPES,
   getExamQuestionType,
   gradeExamAnswers,
-  hasZipFileSignature,
+  hasArchiveFileSignature,
   hashAttachmentBytes,
   hashExamAnswer,
   MAX_EXAM_DURATION_MINUTES,
@@ -719,10 +719,10 @@ async function createActivityOnFreeTier(data, resourceFile = null) {
   try {
     if (resourceFile) {
       const descriptor = validateActivityResourceFile(resourceFile);
-      updateTeacherActivityResourceStatus('Validando o arquivo ZIP de apoio...', 3, 'uploading');
+      updateTeacherActivityResourceStatus('Validando o arquivo de apoio...', 3, 'uploading');
       const bytes = new Uint8Array(await resourceFile.arrayBuffer());
-      if (!hasZipFileSignature(bytes)) {
-        throw new Error('O conteúdo do arquivo de apoio não corresponde a um ZIP válido.');
+      if (!hasArchiveFileSignature(bytes)) {
+        throw new Error('O conteúdo do arquivo de apoio não corresponde a um ZIP ou RAR válido.');
       }
       const chunks = splitAttachmentBytes(bytes);
       const sha256 = await hashAttachmentBytes(bytes);
@@ -825,8 +825,8 @@ async function updateActivityOnFreeTier(data, resourceFile = null, removeResourc
   if (resourceFile) {
     descriptor = validateActivityResourceFile(resourceFile);
     const bytes = new Uint8Array(await resourceFile.arrayBuffer());
-    if (!hasZipFileSignature(bytes)) {
-      throw new Error('O conteúdo do novo arquivo de apoio não corresponde a um ZIP válido.');
+    if (!hasArchiveFileSignature(bytes)) {
+      throw new Error('O conteúdo do novo arquivo de apoio não corresponde a um ZIP ou RAR válido.');
     }
     chunks = splitAttachmentBytes(bytes);
     sha256 = await hashAttachmentBytes(bytes);
@@ -932,10 +932,10 @@ async function downloadActivityResourceOnFreeTier(activity) {
     bytes.set(chunk, offset);
     offset += chunk.length;
   });
-  if (!hasZipFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
+  if (!hasArchiveFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
     throw new Error('A integridade do arquivo de apoio não pôde ser confirmada.');
   }
-  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+  const url = URL.createObjectURL(new Blob([bytes], { type: metadata.contentType || 'application/zip' }));
   const link = document.createElement('a');
   link.href = url;
   link.download = metadata.fileName || 'material-de-apoio.zip';
@@ -993,10 +993,10 @@ async function uploadActivitySubmission(activity, file) {
     throw new Error('O prazo de entrega desta atividade já foi encerrado.');
   }
   const descriptor = validateZipFileDescriptor(file);
-  updateActivityUploadStatus(activity.id, 'Validando arquivo ZIP...', 3, 'uploading');
+  updateActivityUploadStatus(activity.id, 'Validando arquivo (ZIP ou RAR)...', 3, 'uploading');
   const bytes = new Uint8Array(await file.arrayBuffer());
-  if (!hasZipFileSignature(bytes)) {
-    throw new Error('O conteúdo selecionado não corresponde a um arquivo ZIP válido.');
+  if (!hasArchiveFileSignature(bytes)) {
+    throw new Error('O conteúdo selecionado não corresponde a um arquivo ZIP ou RAR válido.');
   }
   const chunks = splitAttachmentBytes(bytes);
   const sha256 = await hashAttachmentBytes(bytes);
@@ -1017,7 +1017,7 @@ async function uploadActivitySubmission(activity, file) {
     userEmail: state.user.email || '',
     studentName: profile.fullName || state.user.displayName || state.user.email || 'Aluno',
     fileName: descriptor.name,
-    contentType: 'application/zip',
+    contentType: descriptor.contentType,
     size: descriptor.size,
     chunkCount: chunks.length,
     sha256,
@@ -1078,10 +1078,10 @@ async function downloadActivitySubmissionOnFreeTier(submissionId) {
     bytes.set(chunk, offset);
     offset += chunk.length;
   });
-  if (!hasZipFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
-    throw new Error('A integridade da entrega ZIP não pôde ser confirmada.');
+  if (!hasArchiveFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
+    throw new Error('A integridade da entrega não pôde ser confirmada.');
   }
-  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+  const url = URL.createObjectURL(new Blob([bytes], { type: metadata.contentType || 'application/zip' }));
   const link = document.createElement('a');
   link.href = url;
   link.download = metadata.fileName || 'atividade.zip';
@@ -1684,7 +1684,7 @@ async function downloadExamAttachmentOnFreeTier(attachmentId) {
   const attachmentRef = db.collection('examAttachments').doc(String(attachmentId || ''));
   const attachmentDoc = await attachmentRef.get();
   if (!attachmentDoc.exists || attachmentDoc.data().status !== 'ready') {
-    throw new Error('Anexo ZIP não encontrado ou ainda incompleto.');
+    throw new Error('Anexo não encontrado ou ainda incompleto.');
   }
 
   const metadata = serializeAttachmentMetadata(attachmentDoc.id, attachmentDoc.data());
@@ -1705,11 +1705,11 @@ async function downloadExamAttachmentOnFreeTier(attachmentId) {
     bytes.set(chunk, offset);
     offset += chunk.length;
   });
-  if (!hasZipFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
-    throw new Error('A integridade do arquivo ZIP não pôde ser confirmada.');
+  if (!hasArchiveFileSignature(bytes) || await hashAttachmentBytes(bytes) !== metadata.sha256) {
+    throw new Error('A integridade do arquivo não pôde ser confirmada.');
   }
 
-  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/zip' }));
+  const url = URL.createObjectURL(new Blob([bytes], { type: metadata.contentType || 'application/zip' }));
   const link = document.createElement('a');
   link.href = url;
   link.download = metadata.fileName || 'projeto.zip';
@@ -3628,9 +3628,9 @@ function renderActivityResource(activity) {
   if (!activity.resource) return '';
   return `
     <div class="activity-support-resource">
-      <span class="attached-file-icon">ZIP</span>
+      <span class="attached-file-icon">${archiveBadgeLabel(activity.resource.fileName)}</span>
       <div><strong>Material de apoio</strong><span>${escapeHtml(activity.resource.fileName)}</span><small>${formatAttachmentSize(activity.resource.size)} · disponibilizado pelo professor</small></div>
-      <button type="button" class="download-attachment-btn" onclick="window.downloadActivityResource('${activity.id}')">Baixar ZIP</button>
+      <button type="button" class="download-attachment-btn" onclick="window.downloadActivityResource('${activity.id}')">Baixar arquivo</button>
     </div>
   `;
 }
@@ -3643,7 +3643,7 @@ function renderActivitySubmissionRows(submissions) {
     <div class="activity-submission-row">
       <div><strong>${escapeHtml(submission.studentName || 'Aluno')}</strong><small>${escapeHtml(submission.userEmail)}</small></div>
       <div><span>${escapeHtml(submission.fileName)}</span><small>${formatAttachmentSize(submission.size)} · ${formatExamDate(submission.submittedAtMillis)}</small></div>
-      <button type="button" class="download-attachment-btn" onclick="window.downloadActivitySubmission('${submission.id}')">Baixar ZIP</button>
+      <button type="button" class="download-attachment-btn" onclick="window.downloadActivitySubmission('${submission.id}')">Baixar arquivo</button>
     </div>
   `).join('')}</div>`;
 }
@@ -3666,11 +3666,11 @@ function renderTeacherActivityCreator() {
         <label class="exam-field"><span>Turma</span><select name="classId" required onchange="window.updateActivityDraft('classId', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''}>${renderAcademicOptions(state.academicClasses, state.teacherActivityClassId, 'Selecione a turma')}</select></label>
         <label class="exam-field"><span>Matéria</span><select name="subjectId" required onchange="window.updateActivityDraft('subjectId', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''}>${renderAcademicOptions(subjects, state.teacherActivitySubjectId, 'Selecione a matéria')}</select></label>
         <label class="exam-field activity-due-date-field"><span>Data de entrega</span><input type="datetime-local" name="dueAt" required min="${formatDateTimeLocal(Date.now() + 60000)}" value="${escapeHtml(state.teacherActivityDueAt)}" oninput="window.updateActivityDraft('dueAt', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''} /><small>Após esse horário, novas entregas e substituições serão bloqueadas.</small></label>
-        <label class="exam-field activity-instructions-field"><span>Orientações</span><textarea name="instructions" maxlength="5000" rows="6" required oninput="window.updateActivityDraft('instructions', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''} placeholder="Descreva o que deve ser entregue e como preparar o arquivo ZIP">${escapeHtml(state.teacherActivityInstructions)}</textarea></label>
+        <label class="exam-field activity-instructions-field"><span>Orientações</span><textarea name="instructions" maxlength="5000" rows="6" required oninput="window.updateActivityDraft('instructions', this.value)" ${state.teacherActivitySubmitting ? 'disabled' : ''} placeholder="Descreva o que deve ser entregue e como preparar o arquivo ZIP ou RAR">${escapeHtml(state.teacherActivityInstructions)}</textarea></label>
         <div class="activity-resource-field">
           <div class="activity-resource-heading">
             <span class="attached-file-icon">ZIP</span>
-            <div><strong>Arquivo de apoio</strong><p>Opcional. Anexe um ZIP com código inicial, exemplos, imagens ou outros materiais para auxiliar o aluno.</p></div>
+            <div><strong>Arquivo de apoio</strong><p>Opcional. Anexe um ZIP ou RAR com código inicial, exemplos, imagens ou outros materiais para auxiliar o aluno.</p></div>
           </div>
           ${resourceFile ? `
             <div class="activity-resource-selected">
@@ -3679,11 +3679,11 @@ function renderTeacherActivityCreator() {
             </div>
           ` : `
             <label class="zip-file-picker ${state.teacherActivitySubmitting ? 'disabled' : ''}">
-              <input type="file" accept=".zip,application/zip" ${state.teacherActivitySubmitting ? 'disabled' : ''} onchange="window.selectTeacherActivityResource(this)" />
-              <span>Selecionar arquivo ZIP de apoio</span>
+              <input type="file" accept=".zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed" ${state.teacherActivitySubmitting ? 'disabled' : ''} onchange="window.selectTeacherActivityResource(this)" />
+              <span>Selecionar arquivo de apoio (ZIP ou RAR)</span>
             </label>
           `}
-          <small>Somente ZIP de até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}.</small>
+          <small>Somente ZIP ou RAR de até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}.</small>
           <div class="zip-upload-progress-track" aria-hidden="true"><span id="teacher-activity-resource-progress" style="width:${state.teacherActivityResourceProgress}%"></span></div>
           <div id="teacher-activity-resource-status" class="zip-upload-status ${state.teacherActivityResourceType}" role="status">${escapeHtml(state.teacherActivityResourceMessage)}</div>
         </div>
@@ -3747,7 +3747,7 @@ function renderTeacherActivityEditor(mainContent) {
         <button type="button" class="remove-resource-btn" onclick="window.markEditingActivityResourceForRemoval()" ${state.editingActivitySubmitting ? 'disabled' : ''}>Remover material</button>
       </div>
       <label class="zip-file-picker ${state.editingActivitySubmitting ? 'disabled' : ''}">
-        <input type="file" accept=".zip,application/zip" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
+        <input type="file" accept=".zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
         <span>Substituir por outro ZIP</span>
       </label>`;
   } else if (currentResource && state.editingActivityRemoveResource) {
@@ -3757,13 +3757,13 @@ function renderTeacherActivityEditor(mainContent) {
         <button type="button" onclick="window.undoEditingActivityResourceRemoval()" ${state.editingActivitySubmitting ? 'disabled' : ''}>Desfazer</button>
       </div>
       <label class="zip-file-picker ${state.editingActivitySubmitting ? 'disabled' : ''}">
-        <input type="file" accept=".zip,application/zip" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
+        <input type="file" accept=".zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
         <span>Selecionar novo ZIP</span>
       </label>`;
   } else {
     resourceControl = `
       <label class="zip-file-picker ${state.editingActivitySubmitting ? 'disabled' : ''}">
-        <input type="file" accept=".zip,application/zip" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
+        <input type="file" accept=".zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed" ${state.editingActivitySubmitting ? 'disabled' : ''} onchange="window.selectEditingActivityResource(this)" />
         <span>Adicionar arquivo ZIP de apoio</span>
       </label>`;
   }
@@ -3785,7 +3785,7 @@ function renderTeacherActivityEditor(mainContent) {
         <div class="activity-resource-field editing-activity-resource-field">
           <div class="activity-resource-heading"><span class="attached-file-icon">ZIP</span><div><strong>Arquivo de apoio</strong><p>Adicione, substitua, preserve ou remova o material vinculado à atividade.</p></div></div>
           ${resourceControl}
-          <small>Somente ZIP de até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}.</small>
+          <small>Somente ZIP ou RAR de até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}.</small>
           <div class="zip-upload-status ${state.editingActivityResourceType}" role="status">${escapeHtml(state.editingActivityResourceMessage)}</div>
         </div>
         <div class="activity-editor-actions">
@@ -3875,18 +3875,18 @@ function renderStudentActivityUpload(activity) {
     <div class="student-activity-delivery ${submission?.status === 'ready' ? 'delivered' : ''} ${submissionOpen ? '' : 'closed'}">
       ${submission?.status === 'ready' ? `
         <div class="attached-file-summary">
-          <span class="attached-file-icon">ZIP</span>
+          <span class="attached-file-icon">${archiveBadgeLabel(submission.fileName)}</span>
           <span><strong>${escapeHtml(submission.fileName)}</strong><small>${formatAttachmentSize(submission.size)} · enviado em ${formatExamDate(submission.submittedAtMillis)}</small></span>
         </div>
       ` : '<p>Nenhuma entrega encaminhada.</p>'}
       ${submissionOpen ? `
         <label class="zip-file-picker ${uploading ? 'disabled' : ''}">
-          <input type="file" accept=".zip,application/zip" ${uploading ? 'disabled' : ''} onchange="window.handleActivityZipUpload('${activity.id}', this)" />
-          <span>${submission?.status === 'ready' ? 'Substituir arquivo ZIP' : 'Selecionar e encaminhar ZIP'}</span>
+          <input type="file" accept=".zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed" ${uploading ? 'disabled' : ''} onchange="window.handleActivityZipUpload('${activity.id}', this)" />
+          <span>${submission?.status === 'ready' ? 'Substituir arquivo (ZIP ou RAR)' : 'Selecionar e encaminhar (ZIP ou RAR)'}</span>
         </label>
       ` : `<div class="activity-delivery-closed">🔒 Prazo encerrado. ${submission?.status === 'ready' ? 'Sua entrega foi preservada.' : 'Não é mais possível encaminhar o arquivo.'}</div>`}
       <div class="zip-upload-progress-track" aria-hidden="true"><span id="activity-upload-progress-${activity.id}" style="width: ${upload?.progress || (submission?.status === 'ready' ? 100 : 0)}%"></span></div>
-      <div id="activity-upload-status-${activity.id}" class="zip-upload-status ${upload?.type || (submission?.status === 'ready' ? 'success' : '')}" role="status">${escapeHtml(upload?.message || (!submissionOpen ? 'O prazo de entrega foi encerrado.' : submission?.status === 'ready' ? 'Atividade encaminhada. Você pode substituir o ZIP até a data de entrega.' : 'Arquivo ZIP de até 5 MB.'))}</div>
+      <div id="activity-upload-status-${activity.id}" class="zip-upload-status ${upload?.type || (submission?.status === 'ready' ? 'success' : '')}" role="status">${escapeHtml(upload?.message || (!submissionOpen ? 'O prazo de entrega foi encerrado.' : submission?.status === 'ready' ? 'Atividade encaminhada. Você pode substituir o arquivo (ZIP ou RAR) até a data de entrega.' : 'Arquivo ZIP ou RAR de até 5 MB.'))}</div>
     </div>
   `;
 }
@@ -4272,6 +4272,11 @@ function formatAttachmentSize(bytes) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function archiveBadgeLabel(fileName) {
+  const match = /\.(zip|rar)$/i.exec(String(fileName || '').trim());
+  return match ? match[1].toUpperCase() : 'ZIP';
+}
+
 function renderQuestionTypeSelector(item, questionIndex, mode) {
   const editing = mode === 'edit';
   const handler = editing ? 'changeEditingExamQuestionType' : 'changeTeacherQuestionType';
@@ -4281,7 +4286,7 @@ function renderQuestionTypeSelector(item, questionIndex, mode) {
       <span>Tipo de pergunta</span>
       <select onchange="window.${handler}(${questionIndex}, this.value)">
         <option value="${EXAM_QUESTION_TYPES.MULTIPLE_CHOICE}" ${type === EXAM_QUESTION_TYPES.MULTIPLE_CHOICE ? 'selected' : ''}>Múltipla escolha</option>
-        <option value="${EXAM_QUESTION_TYPES.ZIP_ATTACHMENT}" ${type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT ? 'selected' : ''}>Resposta com anexo ZIP</option>
+        <option value="${EXAM_QUESTION_TYPES.ZIP_ATTACHMENT}" ${type === EXAM_QUESTION_TYPES.ZIP_ATTACHMENT ? 'selected' : ''}>Resposta com anexo (ZIP ou RAR)</option>
         <option value="${EXAM_QUESTION_TYPES.ESSAY}" ${type === EXAM_QUESTION_TYPES.ESSAY ? 'selected' : ''}>Dissertativa</option>
       </select>
     </label>
@@ -4294,7 +4299,7 @@ function renderZipAttachmentBuilder() {
       <span class="zip-question-icon" aria-hidden="true">ZIP</span>
       <div>
         <strong>Entrega de repositório ou projeto</strong>
-        <p>O aluno deverá anexar um único arquivo <code>.zip</code> de até 5 MB. Esta questão será encaminhada para revisão manual.</p>
+        <p>O aluno deverá anexar um único arquivo <code>.zip</code> ou <code>.rar</code> de até 5 MB. Esta questão será encaminhada para revisão manual.</p>
       </div>
     </div>
   `;
@@ -4869,7 +4874,7 @@ function renderTeacherResultGrade(result) {
 function renderTeacherResultActions(result) {
   const downloads = (result.attachments || []).map((attachment, index) => `
     <button class="download-attachment-btn" onclick="event.stopPropagation(); window.downloadExamAttachment('${attachment.id}')">
-      Baixar ZIP${result.attachments.length > 1 ? ` ${index + 1}` : ''}
+      Baixar arquivo${result.attachments.length > 1 ? ` ${index + 1}` : ''}
     </button>
   `).join('');
   const missing = result.manualReviewCount > 0 && !result.attachments?.length
@@ -5170,21 +5175,21 @@ function renderStudentZipAttachment(question, questionIndex) {
     <div class="student-zip-answer ${hasAttachment ? 'has-file' : ''}">
       <div class="student-zip-heading">
         <div>
-          <strong>${hasAttachment ? 'Arquivo ZIP anexado' : 'Anexe seu projeto em ZIP'}</strong>
-          <p>Somente <code>.zip</code>, até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}. Remova <code>node_modules</code>, builds e dependências antes de compactar.</p>
+          <strong>${hasAttachment ? 'Arquivo anexado' : 'Anexe seu projeto (ZIP ou RAR)'}</strong>
+          <p>Somente <code>.zip</code> ou <code>.rar</code>, até ${formatAttachmentSize(MAX_ZIP_FILE_SIZE_BYTES)}. Remova <code>node_modules</code>, builds e dependências antes de compactar.</p>
         </div>
         <span class="manual-review-pill">Revisão manual</span>
       </div>
       ${attachment?.status === 'ready' ? `
         <div class="attached-file-summary">
-          <span class="attached-file-icon">ZIP</span>
+          <span class="attached-file-icon">${archiveBadgeLabel(attachment.fileName)}</span>
           <span><strong>${escapeHtml(attachment.fileName)}</strong><small>${formatAttachmentSize(attachment.size)}</small></span>
         </div>
       ` : ''}
       <label class="zip-file-picker ${uploading ? 'disabled' : ''}">
-        <input type="file" accept=".zip,application/zip" ${uploading || state.examSubmitting ? 'disabled' : ''}
+        <input type="file" accept=".zip,.rar,application/zip,application/vnd.rar,application/x-rar-compressed" ${uploading || state.examSubmitting ? 'disabled' : ''}
           onchange="window.handleStudentZipUpload(${questionIndex}, this)" />
-        <span>${hasAttachment ? 'Substituir arquivo ZIP' : 'Selecionar e enviar ZIP'}</span>
+        <span>${hasAttachment ? 'Substituir arquivo (ZIP ou RAR)' : 'Selecionar e enviar (ZIP ou RAR)'}</span>
       </label>
       <div class="zip-upload-progress-track" aria-hidden="true">
         <span id="zip-upload-progress-${question.id}" style="width: ${upload?.progress || (attachment?.status === 'ready' ? 100 : 0)}%"></span>
@@ -5395,10 +5400,10 @@ async function uploadStudentZipAnswer(questionIndex, file) {
   }
 
   const descriptor = validateZipFileDescriptor(file);
-  updateAttachmentUploadStatus(question.id, 'Validando arquivo ZIP...', 3, 'uploading');
+  updateAttachmentUploadStatus(question.id, 'Validando arquivo (ZIP ou RAR)...', 3, 'uploading');
   const bytes = new Uint8Array(await file.arrayBuffer());
-  if (!hasZipFileSignature(bytes)) {
-    throw new Error('O conteúdo selecionado não corresponde a um arquivo ZIP válido.');
+  if (!hasArchiveFileSignature(bytes)) {
+    throw new Error('O conteúdo selecionado não corresponde a um arquivo ZIP ou RAR válido.');
   }
 
   const chunks = splitAttachmentBytes(bytes);
@@ -5422,7 +5427,7 @@ async function uploadStudentZipAnswer(questionIndex, file) {
     questionIndex,
     userId: state.user.uid,
     fileName: descriptor.name,
-    contentType: 'application/zip',
+    contentType: descriptor.contentType,
     size: descriptor.size,
     chunkCount: chunks.length,
     sha256,
@@ -5464,7 +5469,7 @@ async function uploadStudentZipAnswer(questionIndex, file) {
     questionIndex,
     userId: state.user.uid,
     fileName: descriptor.name,
-    contentType: 'application/zip',
+    contentType: descriptor.contentType,
     size: descriptor.size,
     chunkCount: chunks.length,
     sha256,

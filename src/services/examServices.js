@@ -223,13 +223,28 @@ export function validateZipAttachmentQuestion(item, index = 0) {
   };
 }
 
+export const ARCHIVE_CONTENT_TYPES = Object.freeze({
+  zip: 'application/zip',
+  rar: 'application/vnd.rar'
+});
+
+export function getArchiveExtension(name) {
+  const match = /\.(zip|rar)$/i.exec(String(name || '').trim());
+  return match ? match[1].toLowerCase() : '';
+}
+
+export function getArchiveContentType(name) {
+  return ARCHIVE_CONTENT_TYPES[getArchiveExtension(name)] || '';
+}
+
 export function validateZipFileDescriptor(file = {}) {
   const name = String(file.name || '').trim();
   const size = Number(file.size || 0);
-  if (!/\.zip$/i.test(name)) throw new Error('Selecione um arquivo com extensão .zip.');
-  if (!Number.isFinite(size) || size <= 0) throw new Error('O arquivo ZIP está vazio.');
-  if (size > MAX_ZIP_FILE_SIZE_BYTES) throw new Error('O arquivo ZIP deve ter no máximo 5 MB.');
-  return { name, size };
+  const extension = getArchiveExtension(name);
+  if (!extension) throw new Error('Selecione um arquivo com extensão .zip ou .rar.');
+  if (!Number.isFinite(size) || size <= 0) throw new Error('O arquivo está vazio.');
+  if (size > MAX_ZIP_FILE_SIZE_BYTES) throw new Error('O arquivo deve ter no máximo 5 MB.');
+  return { name, size, contentType: ARCHIVE_CONTENT_TYPES[extension] };
 }
 
 export function hasZipFileSignature(value) {
@@ -240,6 +255,23 @@ export function hasZipFileSignature(value) {
     && ((bytes[2] === 0x03 && bytes[3] === 0x04)
       || (bytes[2] === 0x05 && bytes[3] === 0x06)
       || (bytes[2] === 0x07 && bytes[3] === 0x08));
+}
+
+export function hasRarFileSignature(value) {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value || []);
+  if (bytes.length < 7) return false;
+  // "Rar!\x1A\x07" followed by 0x00 (RAR 1.5-4.x) or 0x01 (RAR 5.0+)
+  return bytes[0] === 0x52
+    && bytes[1] === 0x61
+    && bytes[2] === 0x72
+    && bytes[3] === 0x21
+    && bytes[4] === 0x1a
+    && bytes[5] === 0x07
+    && (bytes[6] === 0x00 || bytes[6] === 0x01);
+}
+
+export function hasArchiveFileSignature(value) {
+  return hasZipFileSignature(value) || hasRarFileSignature(value);
 }
 
 export function splitAttachmentBytes(value, chunkSize = ATTACHMENT_CHUNK_SIZE_BYTES) {

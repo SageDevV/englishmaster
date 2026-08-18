@@ -104,10 +104,18 @@ describe('activity support resource', () => {
     });
   });
 
-  it('rejects empty, oversized and non-ZIP resources', () => {
-    assert.throws(() => validateActivityResourceFile({ name: 'material.pdf', size: 2048 }), /extensão \.zip/);
+  it('accepts a RAR resource within the size limit', () => {
+    assert.deepEqual(validateActivityResourceFile({ name: 'starter-kit.RAR', size: 2048 }), {
+      name: 'starter-kit.RAR',
+      size: 2048,
+      contentType: 'application/vnd.rar'
+    });
+  });
+
+  it('rejects empty, oversized and unsupported resources', () => {
+    assert.throws(() => validateActivityResourceFile({ name: 'material.pdf', size: 2048 }), /extensão \.zip ou \.rar/);
     assert.throws(() => validateActivityResourceFile({ name: 'material.zip', size: 0 }), /vazio/);
-    assert.throws(() => validateActivityResourceFile({ name: 'material.zip', size: 6 * 1024 * 1024 }), /máximo 5 MB/);
+    assert.throws(() => validateActivityResourceFile({ name: 'material.rar', size: 6 * 1024 * 1024 }), /máximo 5 MB/);
   });
 });
 

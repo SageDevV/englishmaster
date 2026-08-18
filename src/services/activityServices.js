@@ -51,7 +51,7 @@ export function validateActivityResourceFile(file = {}) {
   const descriptor = validateZipFileDescriptor(file);
   return {
     ...descriptor,
-    contentType: 'application/zip'
+    contentType: descriptor.contentType
   };
 }
 

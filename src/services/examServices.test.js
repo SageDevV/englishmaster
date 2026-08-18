@@ -10,6 +10,10 @@ import {
   getExamDurationSeconds,
   getExamQuestionType,
   gradeExamAnswers,
+  getArchiveContentType,
+  getArchiveExtension,
+  hasArchiveFileSignature,
+  hasRarFileSignature,
   hasZipFileSignature,
   hashAttachmentBytes,
   hashExamAnswer,
@@ -100,16 +104,35 @@ assert.deepEqual(zipQuestion, {
 assert.throws(() => validateZipAttachmentQuestion({ prompt: '' }), /Preencha a pergunta/);
 assert.deepEqual(validateZipFileDescriptor({ name: 'projeto.ZIP', size: 1024 }), {
   name: 'projeto.ZIP',
-  size: 1024
+  size: 1024,
+  contentType: 'application/zip'
 });
-assert.throws(() => validateZipFileDescriptor({ name: 'projeto.rar', size: 1024 }), /extensão .zip/);
+assert.deepEqual(validateZipFileDescriptor({ name: 'projeto.RAR', size: 1024 }), {
+  name: 'projeto.RAR',
+  size: 1024,
+  contentType: 'application/vnd.rar'
+});
+assert.throws(() => validateZipFileDescriptor({ name: 'projeto.pdf', size: 1024 }), /extensão .zip ou .rar/);
 assert.throws(
   () => validateZipFileDescriptor({ name: 'projeto.zip', size: MAX_ZIP_FILE_SIZE_BYTES + 1 }),
   /máximo 5 MB/
 );
+assert.equal(getArchiveExtension('trabalho.RAR'), 'rar');
+assert.equal(getArchiveExtension('trabalho.zip'), 'zip');
+assert.equal(getArchiveExtension('trabalho.txt'), '');
+assert.equal(getArchiveContentType('trabalho.rar'), 'application/vnd.rar');
+assert.equal(getArchiveContentType('trabalho.zip'), 'application/zip');
+assert.equal(getArchiveContentType('trabalho.txt'), '');
 assert.equal(hasZipFileSignature(Uint8Array.from([0x50, 0x4b, 0x03, 0x04])), true);
 assert.equal(hasZipFileSignature(Uint8Array.from([0x50, 0x4b, 0x05, 0x06])), true);
 assert.equal(hasZipFileSignature(Uint8Array.from([0x00, 0x01, 0x02, 0x03])), false);
+// RAR 1.5-4.x signature ends in 0x00, RAR 5.0+ ends in 0x01
+assert.equal(hasRarFileSignature(Uint8Array.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00])), true);
+assert.equal(hasRarFileSignature(Uint8Array.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01])), true);
+assert.equal(hasRarFileSignature(Uint8Array.from([0x50, 0x4b, 0x03, 0x04])), false);
+assert.equal(hasArchiveFileSignature(Uint8Array.from([0x50, 0x4b, 0x03, 0x04])), true);
+assert.equal(hasArchiveFileSignature(Uint8Array.from([0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01])), true);
+assert.equal(hasArchiveFileSignature(Uint8Array.from([0x00, 0x01, 0x02, 0x03])), false);
 
 const chunkSource = new Uint8Array(ATTACHMENT_CHUNK_SIZE_BYTES + 7).fill(9);
 const chunks = splitAttachmentBytes(chunkSource);
