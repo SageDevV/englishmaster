@@ -2340,11 +2340,13 @@ async function saveStudentProfile(rawProfile) {
   }
 
   try {
-    const available = await isNicknameAvailable(profile.nicknameKey);
-    if (!available) return { ok: false, message: 'Este nickname já está em uso.' };
-
     const previousStats = state.userStats;
     const previousProfile = previousStats.studentProfile || {};
+    if (isStudentProfileApproved(previousProfile)) {
+      const available = await isNicknameAvailable(profile.nicknameKey);
+      if (!available) return { ok: false, message: 'Este nickname já está em uso.' };
+    }
+
     const previousStatus = getStudentApprovalStatus(previousProfile);
     const isLegacyApprovedProfile = isStudentProfileComplete(previousProfile) && !previousProfile.approvalStatus;
     const approvalStatus = previousStatus === STUDENT_APPROVAL_STATUSES.APPROVED
@@ -6155,6 +6157,19 @@ window.setStudentApproval = async (studentId, decision) => {
   const action = decision === STUDENT_APPROVAL_STATUSES.APPROVED ? 'aprovar' : 'não aprovar';
   if (!window.confirm(`Deseja ${action} o cadastro de ${student.studentProfile.fullName || 'este aluno'}?`)) return;
   try {
+    if (decision === STUDENT_APPROVAL_STATUSES.APPROVED) {
+      const nicknameKey = student.studentProfile.nicknameKey || student.nicknameKey || '';
+      if (!nicknameKey) throw new Error('O cadastro não possui um nickname válido. Peça ao aluno para revisar os dados.');
+      const nicknameSnapshot = await db.collection('users')
+        .where('nicknameKey', '==', nicknameKey)
+        .get();
+      const approvedConflict = nicknameSnapshot.docs.some(doc =>
+        doc.id !== studentId && isStudentProfileApproved(doc.data().studentProfile)
+      );
+      if (approvedConflict) {
+        throw new Error('Este nickname já pertence a outro aluno aprovado. Peça ao aluno para escolher outro nickname.');
+      }
+    }
     const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
     await db.collection('users').doc(studentId).update({
       'studentProfile.approvalStatus': decision,
