@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
   buildSpeedrunQuestionQueue,
   formatElapsedTime,
+  getEffectiveLearningStreak,
   normalizeNicknameKey,
+  updateDailyLearningStreak,
   validateNickname
 } from './gameServices.js';
 
@@ -87,5 +89,24 @@ describe('formatElapsedTime', () => {
     assert.equal(formatElapsedTime(0), '00:00');
     assert.equal(formatElapsedTime(9), '00:09');
     assert.equal(formatElapsedTime(75), '01:15');
+  });
+});
+
+
+describe('daily learning streak', () => {
+  it('counts at most once on the same day', () => {
+    const first = updateDailyLearningStreak({}, '2026-09-03');
+    const second = updateDailyLearningStreak(first, '2026-09-03');
+    assert.deepEqual(first, { learningStreak: 1, lastLearningDate: '2026-09-03' });
+    assert.deepEqual(second, first);
+  });
+
+  it('increments on consecutive days and resets after a gap', () => {
+    const consecutive = updateDailyLearningStreak({ learningStreak: 4, lastLearningDate: '2026-09-02' }, '2026-09-03');
+    const reset = updateDailyLearningStreak(consecutive, '2026-09-05');
+    assert.equal(consecutive.learningStreak, 5);
+    assert.equal(reset.learningStreak, 1);
+    assert.equal(getEffectiveLearningStreak(consecutive, '2026-09-04'), 5);
+    assert.equal(getEffectiveLearningStreak(consecutive, '2026-09-05'), 0);
   });
 });

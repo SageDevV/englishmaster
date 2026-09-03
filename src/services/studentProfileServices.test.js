@@ -1,8 +1,11 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  getStudentApprovalStatus,
+  isStudentProfileApproved,
   isStudentProfileComplete,
   splitStudentFullName,
+  STUDENT_APPROVAL_STATUSES,
   STUDENT_CLASSES,
   validateStudentProfile
 } from './studentProfileServices.js';
@@ -51,5 +54,19 @@ describe('student profile validation', () => {
       firstName: 'Ana',
       lastName: 'Maria Silva'
     });
+  });
+});
+
+
+describe('student approval', () => {
+  it('keeps complete legacy profiles approved', () => {
+    assert.equal(getStudentApprovalStatus(validProfile), STUDENT_APPROVAL_STATUSES.APPROVED);
+    assert.equal(isStudentProfileApproved(validProfile), true);
+  });
+
+  it('blocks pending and rejected profiles', () => {
+    assert.equal(isStudentProfileApproved({ ...validProfile, approvalStatus: 'pending' }), false);
+    assert.equal(isStudentProfileApproved({ ...validProfile, approvalStatus: 'rejected' }), false);
+    assert.equal(getStudentApprovalStatus({}), 'incomplete');
   });
 });

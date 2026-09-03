@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  buildTeacherActivityGroups,
+  buildTeacherExamResultGroups,
   buildTeacherPerformanceDashboard,
   buildTeacherStudentGroups,
   filterTeacherResults,
@@ -295,5 +297,35 @@ describe('teacher performance dashboard', () => {
     assert.equal(dashboard.summary.gradedAttempts, 0);
     assert.equal(dashboard.pendingActivities.length, 0);
     assert.equal(dashboard.errorTopics.length, 0);
+  });
+});
+
+
+describe('grouped teacher views', () => {
+  const studentRecords = [
+    { id: 'student-1', studentProfile: { fullName: 'Ana Silva', nickname: 'ana_dev', classId: 'entra21', className: 'Entra21', courseGoal: 'Aprender desenvolvimento.', email: 'ana@example.com', completed: true, approvalStatus: 'approved' } },
+    { id: 'student-2', studentProfile: { fullName: 'Bruno Souza', nickname: 'bruno_dev', classId: 'entra21', className: 'Entra21', courseGoal: 'Aprender desenvolvimento.', email: 'bruno@example.com', completed: true, approvalStatus: 'approved' } },
+    { id: 'pending', studentProfile: { fullName: 'Pendente Teste', nickname: 'pending_dev', classId: 'entra21', className: 'Entra21', courseGoal: 'Aprender desenvolvimento.', email: 'pending@example.com', completed: true, approvalStatus: 'pending' } }
+  ];
+
+  it('groups results by exam and marks approved students who did not take it', () => {
+    const groups = buildTeacherExamResultGroups({
+      exams: [{ id: 'exam-1', title: 'Prova Web', classId: 'entra21', className: 'Entra21', subjectId: 'web', subjectName: 'Web' }],
+      results: [{ id: 'result-1', examId: 'exam-1', examTitle: 'Prova Web', userId: 'student-1', firstName: 'Ana', lastName: 'Silva', classId: 'entra21', className: 'Entra21', subjectId: 'web', subjectName: 'Web' }],
+      studentRecords,
+      classes
+    });
+    assert.equal(groups.length, 1);
+    assert.equal(groups[0].completedCount, 1);
+    assert.equal(groups[0].pendingCount, 1);
+    assert.equal(groups[0].students.find(student => student.studentId === 'student-2').observation, 'Não realizou a prova.');
+    assert.equal(groups[0].students.some(student => student.studentId === 'pending'), false);
+  });
+
+  it('groups activity submissions and marks missing approved students', () => {
+    const groups = buildTeacherActivityGroups([{ id: 'activity-1', title: 'Projeto', classId: 'entra21', className: 'Entra21', submissions: [{ id: 'submission-1', userId: 'student-1', userEmail: 'ana@example.com' }] }], studentRecords, classes);
+    assert.equal(groups[0].completedCount, 1);
+    assert.equal(groups[0].pendingCount, 1);
+    assert.equal(groups[0].students.find(student => student.studentId === 'student-2').observation, 'Não realizou a atividade.');
   });
 });

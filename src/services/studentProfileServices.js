@@ -6,6 +6,11 @@ import {
 } from './academicServices.js';
 
 export const STUDENT_CLASSES = DEFAULT_ACADEMIC_CLASSES.map(item => item.name);
+export const STUDENT_APPROVAL_STATUSES = Object.freeze({
+  PENDING: 'pending',
+  APPROVED: 'approved',
+  REJECTED: 'rejected'
+});
 
 function normalizeText(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ');
@@ -58,6 +63,18 @@ export function isStudentProfileComplete(profile) {
   } catch {
     return false;
   }
+}
+
+export function getStudentApprovalStatus(profile) {
+  if (!isStudentProfileComplete(profile)) return 'incomplete';
+  const status = normalizeText(profile?.approvalStatus).toLowerCase();
+  if (Object.values(STUDENT_APPROVAL_STATUSES).includes(status)) return status;
+  // Perfis completos anteriores à implantação da aprovação permanecem válidos.
+  return STUDENT_APPROVAL_STATUSES.APPROVED;
+}
+
+export function isStudentProfileApproved(profile) {
+  return getStudentApprovalStatus(profile) === STUDENT_APPROVAL_STATUSES.APPROVED;
 }
 
 export function splitStudentFullName(fullName) {

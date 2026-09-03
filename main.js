@@ -14,7 +14,9 @@ import { manualReadingData } from './src/data/manualReading.js';
 import {
   buildSpeedrunQuestionQueue,
   formatElapsedTime,
+  getEffectiveLearningStreak,
   normalizeNicknameKey,
+  updateDailyLearningStreak,
   resolveProfileName,
   sanitizeNickname,
   validateNickname
@@ -69,8 +71,11 @@ import {
   validateCommunityPost
 } from './src/services/communityServices.js';
 import {
+  getStudentApprovalStatus,
+  isStudentProfileApproved,
   isStudentProfileComplete,
   splitStudentFullName,
+  STUDENT_APPROVAL_STATUSES,
   validateStudentProfile
 } from './src/services/studentProfileServices.js';
 import {
@@ -86,6 +91,8 @@ import {
   validateProjectSubmission
 } from './src/services/projectShowcaseServices.js';
 import {
+  buildTeacherActivityGroups,
+  buildTeacherExamResultGroups,
   buildTeacherPerformanceDashboard,
   buildTeacherStudentGroups,
   filterTeacherResults,
@@ -195,7 +202,9 @@ async function loadAcademicCatalog() {
   try {
     const profileClassId = isAdmin()
       ? ''
-      : getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses);
+      : isStudentProfileApproved(state.userStats.studentProfile)
+        ? getProfileClassId(state.userStats.studentProfile || {}, state.academicClasses)
+        : '';
     const subjectsQuery = isAdmin()
       ? db.collection('academicSubjects')
       : (profileClassId
@@ -1897,6 +1906,8 @@ function createDefaultStats() {
     speedrunLastResult: null,
     totalCorrect: 0,
     quizzesCompleted: 0,
+    learningStreak: 0,
+    lastLearningDate: '',
     rankingScore: 0
   };
 }
@@ -2064,7 +2075,9 @@ auth.onAuthStateChanged(async (user) => {
         await saveProgressToFirestore();
       }
       
-      await loadLeaderboardFromFirestore();
+      if (isAdmin() || isStudentProfileApproved(state.userStats.studentProfile)) {
+        await loadLeaderboardFromFirestore();
+      }
       await loadAcademicCatalog();
       state.currentView = getAuthorizedViewFromHash();
       if (state.currentView === 'exam' && !isAdmin()) {
@@ -2174,6 +2187,8 @@ function normalizeStats(data = {}) {
     speedrunLastResult: data.speedrunLastResult || defaults.speedrunLastResult,
     totalCorrect: Math.max(0, Number(data.totalCorrect || defaults.totalCorrect)),
     quizzesCompleted: Math.max(0, Number(data.quizzesCompleted || defaults.quizzesCompleted)),
+    learningStreak: Math.max(0, Number(data.learningStreak || defaults.learningStreak)),
+    lastLearningDate: String(data.lastLearningDate || defaults.lastLearningDate),
     topicHistory: data.topicHistory || defaults.topicHistory
   };
 
@@ -2324,11 +2339,15 @@ async function saveStudentProfile(rawProfile) {
 
   try {
     const available = await isNicknameAvailable(profile.nicknameKey);
-    if (!available) {
-      return { ok: false, message: 'Este nickname já está em uso.' };
-    }
+    if (!available) return { ok: false, message: 'Este nickname já está em uso.' };
 
     const previousStats = state.userStats;
+    const previousProfile = previousStats.studentProfile || {};
+    const previousStatus = getStudentApprovalStatus(previousProfile);
+    const isLegacyApprovedProfile = isStudentProfileComplete(previousProfile) && !previousProfile.approvalStatus;
+    const approvalStatus = previousStatus === STUDENT_APPROVAL_STATUSES.APPROVED
+      ? (isLegacyApprovedProfile ? '' : STUDENT_APPROVAL_STATUSES.APPROVED)
+      : STUDENT_APPROVAL_STATUSES.PENDING;
     state.userStats = {
       ...state.userStats,
       nickname: profile.nickname,
@@ -2336,7 +2355,8 @@ async function saveStudentProfile(rawProfile) {
       studentProfile: {
         ...profile,
         completed: true,
-        version: 2,
+        version: 3,
+        ...(approvalStatus ? { approvalStatus } : {}),
         updatedAt: new Date().toISOString()
       }
     };
@@ -2347,8 +2367,8 @@ async function saveStudentProfile(rawProfile) {
       return { ok: false, message: 'Não foi possível salvar agora. Tente novamente.' };
     }
 
-    await loadLeaderboardFromFirestore();
-    return { ok: true };
+    if (isStudentProfileApproved(state.userStats.studentProfile)) await loadLeaderboardFromFirestore();
+    return { ok: true, approvalStatus: getStudentApprovalStatus(state.userStats.studentProfile) };
   } catch (error) {
     console.error('Erro ao salvar cadastro do aluno:', error);
     return { ok: false, message: 'Não foi possível validar ou salvar o cadastro.' };
@@ -2661,6 +2681,27 @@ function applyViewTheme() {
   }
 }
 
+function renderStudentApprovalGate() {
+  const mainContent = document.getElementById('main-content');
+  const profile = state.userStats.studentProfile || {};
+  const status = getStudentApprovalStatus(profile);
+  const rejected = status === STUDENT_APPROVAL_STATUSES.REJECTED;
+  mainContent.innerHTML = `
+    <section class="exam-page student-approval-page">
+      <div class="exam-empty approval-gate-card">
+        <div class="empty-icon">${rejected ? '!' : '⌛'}</div>
+        <h2>${rejected ? 'Cadastro não aprovado' : isStudentProfileComplete(profile) ? 'Aguardando aprovação' : 'Complete seu cadastro'}</h2>
+        <p>${rejected
+          ? 'O professor não aprovou este cadastro. Revise seus dados e envie novamente para análise.'
+          : isStudentProfileComplete(profile)
+            ? 'Seu cadastro foi enviado ao professor. Os módulos serão liberados após a aprovação.'
+            : 'Preencha seus dados para enviar o cadastro ao professor.'}</p>
+        <button class="next-btn" onclick="window.navigateTo('student-registration')">${isStudentProfileComplete(profile) ? 'Revisar cadastro' : 'Preencher cadastro'}</button>
+        <button class="secondary-btn" onclick="window.logout()">Sair</button>
+      </div>
+    </section>`;
+}
+
 function renderApp() {
   applyViewTheme();
   if (!state.user) {
@@ -2669,6 +2710,10 @@ function renderApp() {
   }
 
   updateHeader();
+  if (!isAdmin() && state.currentView !== 'student-registration' && !isStudentProfileApproved(state.userStats.studentProfile)) {
+    renderStudentApprovalGate();
+    return;
+  }
   if (state.currentView === 'hub') renderHubHome();
   else if (state.currentView === 'community') renderCommunity();
   else if (state.currentView === 'newsletter') renderNewsletter();
@@ -3413,22 +3458,6 @@ function renderHubHome() {
   const blockedExamCount = state.studentExams.filter(exam => !exam.active).length;
   const activeExamCount = state.studentExams.filter(exam => exam.active).length;
   const modules = [
-    {
-      view: 'newsletter',
-      icon: '⌁',
-      kicker: 'Radar de tecnologia',
-      title: 'Newsletter Dev',
-      description: 'Acompanhe artigos, notícias e discussões das comunidades de desenvolvimento.'
-    },
-    {
-      view: 'projects',
-      icon: '◇',
-      kicker: 'Talentos da plataforma',
-      title: 'Vitrine de projetos',
-      description: isAdmin()
-        ? 'Conheça os trabalhos publicados pelos alunos e acompanhe suas criações.'
-        : 'Divulgue seus trabalhos e conheça projetos criados por outros alunos.'
-    },
     ...(isAdmin() ? [
       {
         view: 'teacher-academics',
@@ -3635,17 +3664,18 @@ function renderActivityResource(activity) {
   `;
 }
 
-function renderActivitySubmissionRows(submissions) {
-  if (!submissions.length) {
-    return '<div class="activity-no-submissions">Nenhuma entrega encaminhada até o momento.</div>';
-  }
-  return `<div class="activity-submission-list">${submissions.map(submission => `
-    <div class="activity-submission-row">
-      <div><strong>${escapeHtml(submission.studentName || 'Aluno')}</strong><small>${escapeHtml(submission.userEmail)}</small></div>
-      <div><span>${escapeHtml(submission.fileName)}</span><small>${formatAttachmentSize(submission.size)} · ${formatExamDate(submission.submittedAtMillis)}</small></div>
-      <button type="button" class="download-attachment-btn" onclick="window.downloadActivitySubmission('${submission.id}')">Baixar arquivo</button>
-    </div>
-  `).join('')}</div>`;
+function renderActivitySubmissionRows(students) {
+  if (!students.length) return '<div class="activity-no-submissions">Nenhum aluno aprovado está vinculado a esta turma.</div>';
+  return `<div class="activity-submission-list">${students.map(item => {
+    const submission = item.submission;
+    return `
+      <div class="activity-submission-row ${item.completed ? 'completed' : 'missing'}">
+        <div><strong>${escapeHtml(item.studentName || 'Aluno')}</strong><small>${escapeHtml(item.email || '')}</small></div>
+        ${item.completed
+          ? `<div><span>${escapeHtml(submission.fileName)}</span><small>${formatAttachmentSize(submission.size)} · ${formatExamDate(submission.submittedAtMillis)}</small></div><button type="button" class="download-attachment-btn" onclick="window.downloadActivitySubmission('${submission.id}')">Baixar arquivo</button>`
+          : `<div class="student-missing-observation"><strong>Não realizou</strong><small>${escapeHtml(item.observation)}</small></div>`}
+      </div>`;
+  }).join('')}</div>`;
 }
 
 function renderTeacherActivityCreator() {
@@ -3797,7 +3827,8 @@ function renderTeacherActivityEditor(mainContent) {
   `;
 }
 
-function renderTeacherActivityCard(activity) {
+function renderTeacherActivityCard(group) {
+  const activity = group.activity;
   const status = getActivityStatus(activity);
   const statusLabel = status === ACTIVITY_STATUSES.ACTIVE
     ? 'Ativa para alunos'
@@ -3825,8 +3856,11 @@ function renderTeacherActivityCard(activity) {
       <p>${escapeHtml(activity.instructions)}</p>
       ${renderActivityDeadline(activity)}
       ${renderActivityResource(activity)}
-      <div class="activity-card-actions"><strong>${activity.submissions.length} entrega(s)</strong>${actions}</div>
-      ${renderActivitySubmissionRows(activity.submissions)}
+      <div class="activity-card-actions"><strong>${group.completedCount}/${group.expectedCount} entrega(s) · ${group.pendingCount} pendente(s)</strong>${actions}</div>
+      <details class="activity-student-group">
+        <summary><span>Alunos da atividade</span><strong>Ver situação individual</strong></summary>
+        ${renderActivitySubmissionRows(group.students)}
+      </details>
     </article>
   `;
 }
@@ -3837,20 +3871,22 @@ function renderTeacherActivities() {
     renderTeacherActivityEditor(mainContent);
     return;
   }
-  if (state.activitiesStatus === 'idle') {
+  if (state.activitiesStatus === 'idle' || state.teacherStudentsStatus === 'idle') {
     state.activitiesStatus = 'loading';
+    state.teacherStudentsStatus = 'loading';
     queueMicrotask(async () => {
-      await loadActivities();
+      await Promise.all([loadActivities(), loadTeacherStudents()]);
       if (state.currentView === 'teacher-activities') renderTeacherActivities();
     });
   }
   const activeActivityCount = state.activities.filter(activity => activity.active && !activity.deleted).length;
-  const content = state.activitiesStatus === 'loading'
+  const activityGroups = buildTeacherActivityGroups(state.activities, state.teacherStudents, state.academicClasses);
+  const content = state.activitiesStatus === 'loading' || state.teacherStudentsStatus === 'loading'
     ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando atividades...</p></div>'
     : state.activitiesStatus === 'error'
       ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.activitiesMessage)}</p><button class="next-btn" onclick="window.refreshActivities()">Tentar novamente</button></div>`
       : state.activities.length
-        ? `<div class="teacher-activity-list">${state.activities.map(renderTeacherActivityCard).join('')}</div>`
+        ? `<div class="teacher-activity-list">${activityGroups.map(renderTeacherActivityCard).join('')}</div>`
         : '<div class="exam-empty"><div class="empty-icon">⇧</div><h3>Nenhuma atividade cadastrada</h3><p>Cadastre a primeira atividade para disponibilizá-la aos alunos.</p><button class="next-btn" onclick="window.navigateTo(\'teacher-activity-create\')">Cadastrar atividade</button></div>';
 
   mainContent.innerHTML = `
@@ -4000,6 +4036,9 @@ function renderStudentRegistration() {
   const email = profile.email || state.user?.email || '';
   const selectedClassId = getProfileClassId(profile, state.academicClasses);
   const isComplete = isStudentProfileComplete(profile);
+  const approvalStatus = getStudentApprovalStatus(profile);
+  const isApproved = approvalStatus === STUDENT_APPROVAL_STATUSES.APPROVED;
+  const approvalLabel = isApproved ? 'Aprovado' : approvalStatus === STUDENT_APPROVAL_STATUSES.REJECTED ? 'Não aprovado' : isComplete ? 'Aguardando aprovação' : 'Cadastro pendente';
   const messageType = state.studentProfileMessage.startsWith('Cadastro salvo') ? 'success' : 'error';
 
   mainContent.innerHTML = `
@@ -4018,9 +4057,9 @@ function renderStudentRegistration() {
           <span class="global-profile-icon" aria-hidden="true">◎</span>
           <div>
             <strong>Perfil compartilhado</strong>
-            <p>Nome, nickname, turma, objetivo e e-mail são salvos em um único cadastro no Firebase.</p>
+            <p>Nome, nickname, turma, objetivo e e-mail são salvos em um único cadastro no Firebase. Novos cadastros precisam ser aprovados pelo professor.</p>
           </div>
-          <span class="profile-completion-badge ${isComplete ? 'complete' : ''}">${isComplete ? 'Cadastro completo' : 'Cadastro pendente'}</span>
+          <span class="profile-completion-badge ${isApproved ? 'complete' : ''}">${approvalLabel}</span>
         </aside>
 
         <form class="student-registration-form" onsubmit="window.submitStudentRegistration(event)">
@@ -4075,7 +4114,7 @@ function renderEnglishMaster() {
           <div class="stat-icon">🔥</div>
           <div class="stat-info">
             <h4>Sequência</h4>
-            <p>${state.streak} Dias</p>
+            <p>${getEffectiveLearningStreak(state.userStats)} Dias</p>
           </div>
         </div>
         <div class="stat-card">
@@ -4531,25 +4570,28 @@ async function loadTeacherExams() {
 
 function renderTeacherStudentCard(student) {
   const initial = escapeHtml(student.fullName.charAt(0).toUpperCase() || 'A');
-  const updatedLabel = student.updatedAtMillis
-    ? formatExamDate(student.updatedAtMillis)
-    : 'Data não informada';
+  const updatedLabel = student.updatedAtMillis ? formatExamDate(student.updatedAtMillis) : 'Data não informada';
+  const pending = student.approvalStatus === STUDENT_APPROVAL_STATUSES.PENDING;
+  const rejected = student.approvalStatus === STUDENT_APPROVAL_STATUSES.REJECTED;
+  const statusLabel = student.approved ? 'Aprovado' : rejected ? 'Não aprovado' : 'Aguardando aprovação';
   return `
-    <article class="teacher-student-card">
+    <article class="teacher-student-card ${student.approved ? 'approved' : rejected ? 'rejected' : 'pending'}">
       <div class="teacher-student-identity">
         <span class="teacher-student-avatar" aria-hidden="true">${initial}</span>
-        <div>
-          <h3>${escapeHtml(student.fullName)}</h3>
-          <span>${student.nickname ? `@${escapeHtml(student.nickname)}` : 'Nickname não informado'}</span>
-        </div>
+        <div><h3>${escapeHtml(student.fullName)}</h3><span>${student.nickname ? `@${escapeHtml(student.nickname)}` : 'Nickname não informado'}</span></div>
+        <span class="student-approval-badge">${statusLabel}</span>
       </div>
       <dl class="teacher-student-details">
         <div><dt>E-mail</dt><dd>${escapeHtml(student.email || 'Não informado')}</dd></div>
         <div><dt>Objetivo com o curso</dt><dd>${escapeHtml(student.courseGoal || 'Não informado')}</dd></div>
         <div><dt>Cadastro atualizado</dt><dd>${escapeHtml(updatedLabel)}</dd></div>
       </dl>
-    </article>
-  `;
+      <div class="student-approval-actions">
+        ${student.approved ? '<span>Aluno com acesso liberado.</span>' : `<button class="approve-student-btn" onclick="window.setStudentApproval('${student.id}', 'approved')">Aprovar aluno</button>`}
+        ${!rejected ? `<button class="reject-student-btn" onclick="window.setStudentApproval('${student.id}', 'rejected')">Não aprovar</button>` : ''}
+        ${pending ? '<small>Este aluno ainda não pode acessar os módulos.</small>' : ''}
+      </div>
+    </article>`;
 }
 
 function renderTeacherStudents() {
@@ -4561,6 +4603,7 @@ function renderTeacherStudents() {
 
   const groups = buildTeacherStudentGroups(state.teacherStudents, state.academicClasses);
   const studentCount = groups.reduce((total, group) => total + group.students.length, 0);
+  const pendingCount = groups.reduce((total, group) => total + group.students.filter(student => !student.approved).length, 0);
   const content = state.teacherStudentsStatus === 'loading'
     ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando alunos...</p></div>'
     : state.teacherStudentsStatus === 'error'
@@ -4583,7 +4626,7 @@ function renderTeacherStudents() {
         <div><span class="eyebrow">Área do professor</span><h2>Alunos por turma</h2><p>Consulte nome, nickname, e-mail e objetivo informados no perfil global.</p></div>
         <button class="secondary-btn" onclick="window.refreshTeacherStudents()">Atualizar</button>
       </div>
-      ${state.teacherStudentsStatus === 'ready' ? `<div class="teacher-student-summary"><span><strong>${studentCount}</strong> ${studentCount === 1 ? 'aluno cadastrado' : 'alunos cadastrados'}</span><span><strong>${groups.length}</strong> ${groups.length === 1 ? 'turma' : 'turmas'}</span></div>` : ''}
+      ${state.teacherStudentsStatus === 'ready' ? `<div class="teacher-student-summary"><span><strong>${studentCount}</strong> ${studentCount === 1 ? 'aluno cadastrado' : 'alunos cadastrados'}</span><span><strong>${pendingCount}</strong> aguardando decisão</span><span><strong>${groups.length}</strong> ${groups.length === 1 ? 'turma' : 'turmas'}</span></div>` : ''}
       ${content}
     </section>
   `;
@@ -4940,14 +4983,41 @@ function renderTeacherResultReview(result) {
   `;
 }
 
+function renderTeacherResultCard(result) {
+  return `
+    <article class="teacher-result-card" role="button" tabindex="0"
+      onclick="window.openExamResultReview('${result.id}')"
+      onkeydown="if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); window.openExamResultReview('${result.id}'); }">
+      <div class="teacher-result-card-topline"><span>Realizou</span><time>${formatExamDate(result.submittedAtMillis)}</time></div>
+      <h3>${escapeHtml(`${result.firstName} ${result.lastName}`)}</h3>
+      <p>${escapeHtml(result.userEmail || '')}</p>
+      <div class="teacher-result-card-score">${renderTeacherResultGrade(result)}</div>
+      <div class="teacher-result-card-footer"><span>Tempo: <strong>${formatExamTime(result.elapsedSeconds)}</strong></span><span>Abrir correção →</span></div>
+      <div class="result-action-list">${renderTeacherResultActions(result)}</div>
+    </article>`;
+}
+
+function renderTeacherExamResultGroup(group) {
+  return `
+    <details class="teacher-exam-result-group">
+      <summary>
+        <div><span>${escapeHtml(group.subjectName)}</span><h3>${escapeHtml(group.examTitle)}</h3><small>${escapeHtml(group.className)}</small></div>
+        <div class="exam-group-counts"><strong>${group.completedCount} realizaram</strong><span>${group.pendingCount} não realizaram</span></div>
+      </summary>
+      <div class="exam-group-students">
+        ${group.students.length ? group.students.map(item => item.completed
+          ? renderTeacherResultCard(item.result)
+          : `<article class="teacher-result-card missing-result"><div class="teacher-result-card-topline"><span>Não realizou</span></div><h3>${escapeHtml(item.studentName)}</h3><p>${escapeHtml(item.email)}</p><div class="student-missing-observation"><strong>Observação</strong><small>${escapeHtml(item.observation)}</small></div></article>`).join('')
+          : '<div class="activity-no-submissions">Nenhum aluno aprovado está vinculado a esta turma.</div>'}
+      </div>
+    </details>`;
+}
+
 function renderTeacherResults() {
   const mainContent = document.getElementById('main-content');
   if (state.reviewingExamResultId) {
     const selectedResult = state.examResults.find(result => result.id === state.reviewingExamResultId);
-    if (selectedResult) {
-      renderTeacherResultReview(selectedResult);
-      return;
-    }
+    if (selectedResult) { renderTeacherResultReview(selectedResult); return; }
     state.reviewingExamResultId = null;
   }
   if (state.examResultsStatus === 'idle') {
@@ -4956,54 +5026,48 @@ function renderTeacherResults() {
   }
 
   const filteredResults = filterTeacherResults(state.examResults, state.examResultFilters);
-  const filters = state.examResultsStatus === 'ready' && state.examResults.length
-    ? renderTeacherResultFilters(filteredResults.length)
-    : '';
+  const groups = buildTeacherExamResultGroups({
+    results: state.examResults,
+    exams: state.teacherExams,
+    studentRecords: state.teacherStudents,
+    classes: state.academicClasses,
+    filters: state.examResultFilters
+  });
+  const filters = state.examResultsStatus === 'ready' && (state.examResults.length || state.teacherExams.length)
+    ? renderTeacherResultFilters(filteredResults.length) : '';
   const content = state.examResultsStatus === 'loading'
-    ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando resultados...</p></div>'
+    ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando provas e resultados...</p></div>'
     : state.examResultsStatus === 'error'
       ? `<div class="exam-empty"><h3>Não foi possível carregar</h3><p>${escapeHtml(state.examResultsMessage)}</p><button class="next-btn" onclick="window.refreshExamResults()">Tentar novamente</button></div>`
-      : filteredResults.length
-        ? `<div class="teacher-result-card-grid">
-            ${filteredResults.map(result => `
-              <article class="teacher-result-card" role="button" tabindex="0"
-                onclick="window.openExamResultReview('${result.id}')"
-                onkeydown="if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); window.openExamResultReview('${result.id}'); }">
-                <div class="teacher-result-card-topline"><span>${escapeHtml(result.examTitle || 'Prova')}</span><time>${formatExamDate(result.submittedAtMillis)}</time></div>
-                <h3>${escapeHtml(`${result.firstName} ${result.lastName}`)}</h3>
-                <p>${escapeHtml(result.userEmail || '')}</p>
-                <div class="exam-academic-meta"><span>${escapeHtml(result.className || 'Turma não informada')}</span><span>${escapeHtml(result.subjectName || 'Matéria não informada')}</span></div>
-                <div class="teacher-result-card-score">${renderTeacherResultGrade(result)}</div>
-                <div class="teacher-result-card-footer"><span>Tempo: <strong>${formatExamTime(result.elapsedSeconds)}</strong></span><span>Abrir correção →</span></div>
-                <div class="result-action-list">${renderTeacherResultActions(result)}</div>
-              </article>
-            `).join('')}
-          </div>`
-        : state.examResults.length
-          ? '<div class="exam-empty filtered-results-empty"><h3>Nenhum resultado encontrado</h3><p>Altere ou limpe os filtros para visualizar outros resultados.</p></div>'
-          : '<div class="exam-empty"><h3>Nenhuma prova realizada</h3><p>Os resultados aparecerão aqui assim que os alunos enviarem a avaliação.</p></div>';
+      : groups.length
+        ? `<div class="teacher-exam-result-groups">${groups.map(renderTeacherExamResultGroup).join('')}</div>`
+        : '<div class="exam-empty"><h3>Nenhuma prova encontrada</h3><p>As provas cadastradas aparecerão aqui com a situação de cada aluno.</p></div>';
 
   mainContent.innerHTML = `
     <section class="exam-page teacher-results-page">
       <div class="exam-page-heading results-heading">
-        <div><span class="eyebrow">Área do professor</span><h2>Dashboard de Resultados</h2><p>Clique no card de um aluno para corrigir as respostas e contabilizar a nota final.</p></div>
+        <div><span class="eyebrow">Área do professor</span><h2>Dashboard de Resultados</h2><p>Os resultados estão agrupados por prova. Abra uma prova para consultar quem realizou e quem ainda não realizou.</p></div>
         <button class="secondary-btn" onclick="window.refreshExamResults()">Atualizar</button>
       </div>
       ${state.examResultsMessage ? `<div class="exam-alert ${state.examResultsMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.examResultsMessage)}</div>` : ''}
       ${filters}
       ${content}
-    </section>
-  `;
+    </section>`;
 }
 
 async function loadTeacherResults() {
   try {
-    const data = await callExamApi('listExamResults');
-    state.examResults = data.results || [];
+    const [resultData, examData] = await Promise.all([
+      callExamApi('listExamResults'),
+      callExamApi('listRegisteredExams'),
+      loadTeacherStudents()
+    ]);
+    state.examResults = resultData.results || [];
+    state.teacherExams = examData.exams || [];
     state.examResultsStatus = 'ready';
   } catch (error) {
     state.examResultsStatus = 'error';
-    state.examResultsMessage = getFriendlyError(error, 'Não foi possível carregar os resultados.');
+    state.examResultsMessage = getFriendlyError(error, 'Não foi possível carregar as provas e os resultados.');
   }
   if (state.currentView === 'teacher-results') renderTeacherResults();
 }
@@ -6020,6 +6084,29 @@ window.clearExamResultFilters = () => {
   renderTeacherResults();
 };
 
+window.setStudentApproval = async (studentId, decision) => {
+  if (!Object.values(STUDENT_APPROVAL_STATUSES).includes(decision) || decision === STUDENT_APPROVAL_STATUSES.PENDING) return;
+  const student = state.teacherStudents.find(item => item.id === studentId);
+  if (!student?.studentProfile) return;
+  const action = decision === STUDENT_APPROVAL_STATUSES.APPROVED ? 'aprovar' : 'não aprovar';
+  if (!window.confirm(`Deseja ${action} o cadastro de ${student.studentProfile.fullName || 'este aluno'}?`)) return;
+  try {
+    const serverTimestamp = firebase.firestore.FieldValue.serverTimestamp();
+    await db.collection('users').doc(studentId).update({
+      'studentProfile.approvalStatus': decision,
+      'studentProfile.approvalUpdatedAt': serverTimestamp,
+      'studentProfile.approvedBy': state.user.uid,
+      'studentProfile.approvedByEmail': state.user.email || '',
+      updatedAt: serverTimestamp
+    });
+    state.teacherStudentsMessage = decision === STUDENT_APPROVAL_STATUSES.APPROVED ? 'Aluno aprovado e acesso liberado.' : 'Cadastro marcado como não aprovado.';
+    await loadTeacherStudents();
+  } catch (error) {
+    state.teacherStudentsMessage = `Erro: ${getFriendlyError(error, 'Não foi possível atualizar a aprovação.')}`;
+  }
+  renderTeacherStudents();
+};
+
 window.refreshTeacherStudents = () => {
   state.teacherStudentsMessage = '';
   state.teacherStudentsStatus = 'idle';
@@ -6431,7 +6518,7 @@ window.downloadActivitySubmission = async submissionId => {
 window.refreshActivities = async () => {
   state.activitiesStatus = 'loading';
   state.activitiesMessage = '';
-  await loadActivities();
+  await Promise.all([loadActivities(), isAdmin() ? loadTeacherStudents() : Promise.resolve()]);
   if (isAdmin()) renderTeacherActivities();
   else renderStudentActivities();
 };
@@ -6459,7 +6546,9 @@ window.submitStudentRegistration = async event => {
 
   const result = await saveStudentProfile(rawProfile);
   state.studentProfileMessage = result.ok
-    ? 'Cadastro salvo com sucesso. Seu perfil global já está disponível nos submódulos.'
+    ? result.approvalStatus === STUDENT_APPROVAL_STATUSES.APPROVED
+      ? 'Cadastro salvo com sucesso. Seu acesso permanece aprovado.'
+      : 'Cadastro salvo com sucesso e enviado para aprovação do professor.'
     : result.message;
   if (result.ok) {
     state.studentExams = [];
@@ -7078,6 +7167,7 @@ function handleCorrectAnswer() {
   state.score++;
   state.streak++;
   state.userStats.totalCorrect++;
+  Object.assign(state.userStats, updateDailyLearningStreak(state.userStats));
 
   if (state.isSurvivor && state.streak > 0 && state.streak % SHIELD_EVERY_STREAK === 0) {
     state.shields = Math.min(MAX_SHIELDS, state.shields + 1);

@@ -15,6 +15,52 @@ service cloud.firestore {
       return signedIn() && request.auth.uid == userId;
     }
 
+    function userApprovalStatus(data) {
+      return data.keys().hasAny(['studentProfile'])
+        && data.studentProfile is map
+        && data.studentProfile.keys().hasAny(['approvalStatus'])
+        ? data.studentProfile.approvalStatus
+        : '';
+    }
+
+    function isApprovedStudent() {
+      let user = get(/databases/$(database)/documents/users/$(request.auth.uid));
+      return signedIn()
+        && user.data.studentProfile is map
+        && user.data.studentProfile.completed == true
+        && (userApprovalStatus(user.data) == '' || userApprovalStatus(user.data) == 'approved');
+    }
+
+    function profileCompleted(data) {
+      return data.keys().hasAny(['studentProfile'])
+        && data.studentProfile is map
+        && data.studentProfile.completed == true;
+    }
+
+    function validOwnerUserCreate(userId) {
+      let status = userApprovalStatus(request.resource.data);
+      return ownsUser(userId)
+        && (status == 'pending' || (status == '' && !profileCompleted(request.resource.data)));
+    }
+
+    function validOwnerUserUpdate(userId) {
+      let oldStatus = userApprovalStatus(resource.data);
+      let newStatus = userApprovalStatus(request.resource.data);
+      return ownsUser(userId)
+        && ((oldStatus != '' && newStatus == oldStatus)
+          || (oldStatus == '' && newStatus == ''
+            && (!profileCompleted(request.resource.data) || profileCompleted(resource.data)))
+          || (oldStatus == '' && newStatus == 'pending')
+          || (oldStatus == 'rejected' && newStatus == 'pending'));
+    }
+
+    function validArchiveMetadata(data) {
+      let zip = data.fileName.matches('.*[.][zZ][iI][pP]') && data.contentType == 'application/zip';
+      let rar = data.fileName.matches('.*[.][rR][aA][rR]')
+        && data.contentType in ['application/vnd.rar', 'application/x-rar-compressed'];
+      return zip || rar;
+    }
+
     function attemptDuration(data) {
       return data.keys().hasAny(['durationSeconds'])
         ? duration.value(data.durationSeconds, 's')
@@ -140,7 +186,7 @@ service cloud.firestore {
     function canReadActivityResource(activityId) {
       let activity = get(/databases/$(database)/documents/activities/$(activityId));
       return isAdmin()
-        || (signedIn()
+        || (isApprovedStudent()
           && activity.data.active == true
           && activity.data.deleted == false
           && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
@@ -161,8 +207,7 @@ service cloud.firestore {
         && data.fileName is string
         && data.fileName.size() >= 5
         && data.fileName.size() <= 255
-        && data.fileName.matches('.*[.][zZ][iI][pP]')
-        && data.contentType == 'application/zip'
+        && validArchiveMetadata(data)
         && data.size is int
         && data.size > 0
         && data.size <= 5242880
@@ -234,8 +279,7 @@ service cloud.firestore {
         && data.fileName is string
         && data.fileName.size() >= 5
         && data.fileName.size() <= 255
-        && data.fileName.matches('.*[.][zZ][iI][pP]')
-        && data.contentType == 'application/zip'
+        && validArchiveMetadata(data)
         && data.size is int
         && data.size > 0
         && data.size <= 5242880
@@ -301,8 +345,7 @@ service cloud.firestore {
         && data.fileName is string
         && data.fileName.size() >= 5
         && data.fileName.size() <= 255
-        && data.fileName.matches('.*[.][zZ][iI][pP]')
-        && data.contentType == 'application/zip'
+        && validArchiveMetadata(data)
         && data.size is int
         && data.size > 0
         && data.size <= 5242880
@@ -437,8 +480,9 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read: if signedIn();
-      allow create, update: if ownsUser(userId);
+      allow read: if isAdmin() || ownsUser(userId) || isApprovedStudent();
+      allow create: if isAdmin() || validOwnerUserCreate(userId);
+      allow update: if isAdmin() || validOwnerUserUpdate(userId);
       allow delete: if false;
     }
 
@@ -450,7 +494,7 @@ service cloud.firestore {
 
     match /academicSubjects/{subjectId} {
       allow read: if isAdmin()
-        || (signedIn()
+        || (isApprovedStudent()
           && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
               && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.classId == resource.data.classId)
             || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
@@ -461,7 +505,7 @@ service cloud.firestore {
 
     match /studyReferences/{referenceId} {
       allow read: if isAdmin()
-        || (signedIn()
+        || (isApprovedStudent()
           && resource.data.active == true
           && resource.data.deleted == false
           && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
@@ -473,17 +517,17 @@ service cloud.firestore {
     }
 
     match /projectShowcase/{projectId} {
-      allow read: if signedIn()
+      allow read: if isApprovedStudent()
         && resource.data.active == true
         && resource.data.deleted == false;
-      allow create: if signedIn() && validProjectShowcaseCreate();
+      allow create: if isApprovedStudent() && validProjectShowcaseCreate();
       allow update: if signedIn() && validProjectShowcaseArchive();
       allow delete: if false;
     }
 
     match /communityPosts/{postId} {
       allow read: if isAdmin()
-        || (signedIn()
+        || (isApprovedStudent()
           && resource.data.active == true
           && resource.data.deleted == false
           && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
@@ -497,7 +541,7 @@ service cloud.firestore {
 
     match /activities/{activityId} {
       allow read: if isAdmin()
-        || (signedIn()
+        || (isApprovedStudent()
           && resource.data.active == true
           && resource.data.deleted == false
           && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
@@ -522,26 +566,26 @@ service cloud.firestore {
     }
 
     match /activitySubmissions/{submissionId} {
-      allow get: if signedIn()
-        && (isAdmin() || submissionId.matches('.*__' + request.auth.uid));
+      allow get: if isAdmin()
+        || (isApprovedStudent() && submissionId.matches('.*__' + request.auth.uid));
       allow list: if isAdmin();
-      allow create, update: if signedIn() && validActivitySubmission(submissionId);
+      allow create, update: if isApprovedStudent() && validActivitySubmission(submissionId);
       allow delete: if false;
 
       match /chunks/{chunkId} {
-        allow get, list: if signedIn()
-          && (isAdmin()
-            || get(/databases/$(database)/documents/activitySubmissions/$(submissionId)).data.userId == request.auth.uid);
-        allow create, update: if signedIn() && validActivitySubmissionChunk(submissionId, chunkId);
-        allow delete: if signedIn()
+        allow get, list: if isAdmin()
+          || (isApprovedStudent()
+            && get(/databases/$(database)/documents/activitySubmissions/$(submissionId)).data.userId == request.auth.uid);
+        allow create, update: if isApprovedStudent() && validActivitySubmissionChunk(submissionId, chunkId);
+        allow delete: if isApprovedStudent()
           && get(/databases/$(database)/documents/activitySubmissions/$(submissionId)).data.userId == request.auth.uid
           && get(/databases/$(database)/documents/activitySubmissions/$(submissionId)).data.status == 'uploading';
       }
     }
 
     match /gameResults/{resultId} {
-      allow read: if signedIn();
-      allow create: if signedIn() && request.resource.data.userId == request.auth.uid;
+      allow read: if isAdmin() || isApprovedStudent();
+      allow create: if isApprovedStudent() && request.resource.data.userId == request.auth.uid;
       allow update, delete: if false;
     }
 
@@ -549,7 +593,7 @@ service cloud.firestore {
     // e somente o professor identificado pode criar, publicar ou arquivar provas.
     match /exams/{examId} {
       allow read: if isAdmin()
-        || (signedIn()
+        || (isApprovedStudent()
           && ((get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId'])
               && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.classId == resource.data.classId)
             || (!(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.studentProfile.keys().hasAny(['classId']))
@@ -559,21 +603,21 @@ service cloud.firestore {
     }
 
     match /examAttachments/{attachmentId} {
-      allow get: if signedIn()
-        && (isAdmin() || attachmentId.matches('.*__' + request.auth.uid + '__.*'));
+      allow get: if isAdmin()
+        || (isApprovedStudent() && attachmentId.matches('.*__' + request.auth.uid + '__.*'));
       allow list: if isAdmin();
-      allow create: if signedIn() && validAttachmentMetadata(attachmentId);
-      allow update: if signedIn()
+      allow create: if isApprovedStudent() && validAttachmentMetadata(attachmentId);
+      allow update: if isApprovedStudent()
         && resource.data.userId == request.auth.uid
         && validAttachmentMetadata(attachmentId);
-      allow delete: if signedIn() && canDeleteAttachment(resource.data);
+      allow delete: if isApprovedStudent() && canDeleteAttachment(resource.data);
 
       match /chunks/{chunkId} {
-        allow get, list: if signedIn()
-          && (isAdmin()
-            || get(/databases/$(database)/documents/examAttachments/$(attachmentId)).data.userId == request.auth.uid);
-        allow create, update: if signedIn() && validAttachmentChunk(attachmentId, chunkId);
-        allow delete: if signedIn()
+        allow get, list: if isAdmin()
+          || (isApprovedStudent()
+            && get(/databases/$(database)/documents/examAttachments/$(attachmentId)).data.userId == request.auth.uid);
+        allow create, update: if isApprovedStudent() && validAttachmentChunk(attachmentId, chunkId);
+        allow delete: if isApprovedStudent()
           && canDeleteAttachment(
             get(/databases/$(database)/documents/examAttachments/$(attachmentId)).data
           );
@@ -581,12 +625,12 @@ service cloud.firestore {
     }
 
     match /examAttempts/{attemptId} {
-      allow get: if signedIn()
-        && (attemptId.matches('.*__' + request.auth.uid) || isAdmin());
+      allow get: if isAdmin()
+        || (isApprovedStudent() && attemptId.matches('.*__' + request.auth.uid));
       allow list: if isAdmin();
-      allow create: if signedIn() && validAttemptCreate(attemptId);
+      allow create: if isApprovedStudent() && validAttemptCreate(attemptId);
       allow update: if signedIn()
-        && ((resource.data.userId == request.auth.uid && validAttemptUpdate())
+        && ((isApprovedStudent() && resource.data.userId == request.auth.uid && validAttemptUpdate())
           || validAdminLogDeletion()
           || validAdminEssayReview());
       allow delete: if false;

@@ -13,8 +13,6 @@ export function shuffleItems(items, random = Math.random) {
 
 export function sanitizeNickname(value) {
   return String(value ?? '').trim().replace(/\s+/g, ' ');
-
-
 }
 
 export function normalizeNicknameKey(value) {
@@ -56,6 +54,49 @@ export function formatElapsedTime(totalSeconds) {
   const seconds = safeSeconds % 60;
 
   return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+function toLocalDateKey(value = Date.now()) {
+  if (/^\d{4}-\d{2}-\d{2}$/.test(String(value))) return String(value);
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, '0'),
+    String(date.getDate()).padStart(2, '0')
+  ].join('-');
+}
+
+function dateKeyToDayNumber(value) {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(value || ''));
+  if (!match) return null;
+  const day = Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])) / 86400000;
+  return Number.isFinite(day) ? day : null;
+}
+
+export function updateDailyLearningStreak(stats = {}, activityAt = Date.now()) {
+  const activityDate = toLocalDateKey(activityAt);
+  if (!activityDate) return { learningStreak: Math.max(0, Number(stats.learningStreak || 0)), lastLearningDate: String(stats.lastLearningDate || '') };
+  const previousDate = stats.lastLearningDate ? toLocalDateKey(stats.lastLearningDate) : '';
+  const previousStreak = Math.max(0, Number(stats.learningStreak || 0));
+  if (previousDate === activityDate) {
+    return { learningStreak: previousStreak, lastLearningDate: activityDate };
+  }
+
+  const currentDay = dateKeyToDayNumber(activityDate);
+  const previousDay = dateKeyToDayNumber(previousDate);
+  return {
+    learningStreak: previousDay !== null && currentDay - previousDay === 1 ? previousStreak + 1 : 1,
+    lastLearningDate: activityDate
+  };
+}
+
+export function getEffectiveLearningStreak(stats = {}, now = Date.now()) {
+  const streak = Math.max(0, Number(stats.learningStreak || 0));
+  const currentDay = dateKeyToDayNumber(toLocalDateKey(now));
+  const lastDay = dateKeyToDayNumber(toLocalDateKey(stats.lastLearningDate));
+  if (!streak || currentDay === null || lastDay === null) return 0;
+  return currentDay - lastDay <= 1 ? streak : 0;
 }
 
 function createQuestionRecord(topicId, question, index) {

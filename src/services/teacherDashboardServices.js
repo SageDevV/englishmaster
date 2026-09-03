@@ -115,6 +115,10 @@ export function buildTeacherStudentGroups(records = [], classes = []) {
       className: className || 'Turma não informada',
       courseGoal: normalizeText(profile.courseGoal),
       email: normalizeText(profile.email || record.email).toLowerCase(),
+      approvalStatus: ['pending', 'approved', 'rejected'].includes(String(profile.approvalStatus || ''))
+        ? String(profile.approvalStatus)
+        : 'approved',
+      approved: !['pending', 'rejected'].includes(String(profile.approvalStatus || '')),
       updatedAtMillis: toMillis(profile.updatedAt) || toMillis(record.updatedAt)
     });
   });
@@ -195,7 +199,7 @@ export function buildTeacherPerformanceDashboard({
   const filteredActivities = (activities || [])
     .filter(activity => activity.active !== false && activity.deleted !== true)
     .filter(activity => matchesDashboardAcademicFilter(activity, filters));
-  const students = buildTeacherStudentGroups(studentRecords, classes).flatMap(group => group.students);
+  const students = buildTeacherStudentGroups(studentRecords, classes).flatMap(group => group.students).filter(student => student.approved);
   const aliasesToStudent = new Map();
   students.forEach(student => {
     const canonicalKey = getStudentAliases(student)[0] || getStudentAliases(student)[1] || getStudentAliases(student)[2];
@@ -357,4 +361,158 @@ export function buildTeacherPerformanceDashboard({
     pendingActivities,
     examComparison
   };
+}
+
+
+function getStudentsForAcademicClass(students, item) {
+  const itemClassKey = getAcademicFilterKey(item.classId, item.className);
+  return students.filter(student => itemClassKey
+    && getAcademicFilterKey(student.classId, student.className) === itemClassKey);
+}
+
+function studentMatchesResultFilter(student, studentKey) {
+  return !studentKey || getStudentAliases(student).includes(studentKey);
+}
+
+function getExamGroupKey(item = {}) {
+  const examId = normalizeText(item.examId || item.id);
+  if (examId) return `id:${examId}`;
+  return `title:${normalizeAcademicKey(item.examTitle || item.title || 'Avaliação')}`;
+}
+
+export function buildTeacherExamResultGroups({
+  results = [],
+  exams = [],
+  studentRecords = [],
+  classes = [],
+  filters = {}
+} = {}) {
+  const approvedStudents = buildTeacherStudentGroups(studentRecords, classes)
+    .flatMap(group => group.students)
+    .filter(student => student.approved);
+  const filteredResults = filterTeacherResults(results, filters);
+  const groups = new Map();
+
+  (exams || [])
+    .filter(exam => exam.deleted !== true)
+    .filter(exam => matchesDashboardAcademicFilter(exam, filters))
+    .forEach(exam => groups.set(getExamGroupKey(exam), {
+      examId: exam.id || '',
+      examTitle: exam.title || 'Avaliação',
+      classId: exam.classId || '',
+      className: exam.className || 'Turma não informada',
+      subjectId: exam.subjectId || '',
+      subjectName: exam.subjectName || 'Matéria não informada',
+      updatedAtMillis: toMillis(exam.updatedAtMillis || exam.createdAtMillis),
+      results: []
+    }));
+
+  filteredResults.forEach(result => {
+    const key = getExamGroupKey(result);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        examId: result.examId || '',
+        examTitle: result.examTitle || 'Avaliação',
+        classId: result.classId || '',
+        className: result.className || 'Turma não informada',
+        subjectId: result.subjectId || '',
+        subjectName: result.subjectName || 'Matéria não informada',
+        updatedAtMillis: toMillis(result.submittedAtMillis),
+        results: []
+      });
+    }
+    groups.get(key).results.push(result);
+  });
+
+  return [...groups.values()].map(group => {
+    const expectedStudents = getStudentsForAcademicClass(approvedStudents, group)
+      .filter(student => studentMatchesResultFilter(student, filters.studentKey));
+    const resultsByAlias = new Map();
+    group.results.forEach(result => {
+      const key = getTeacherResultStudentKey(result);
+      if (!filters.studentKey || key === filters.studentKey) resultsByAlias.set(key, result);
+    });
+    const matchedResultIds = new Set();
+    const students = expectedStudents.map(student => {
+      const result = getStudentAliases(student).map(alias => resultsByAlias.get(alias)).find(Boolean) || null;
+      if (result) matchedResultIds.add(result.id);
+      return {
+        studentId: student.id,
+        studentName: student.fullName,
+        email: student.email,
+        completed: Boolean(result),
+        observation: result ? '' : 'Não realizou a prova.',
+        result
+      };
+    });
+    group.results.forEach(result => {
+      if (matchedResultIds.has(result.id)) return;
+      const resultKey = getTeacherResultStudentKey(result);
+      if (filters.studentKey && resultKey !== filters.studentKey) return;
+      students.push({
+        studentId: result.userId || '',
+        studentName: normalizeText(`${result.firstName || ''} ${result.lastName || ''}`) || result.userEmail || 'Aluno não identificado',
+        email: result.userEmail || '',
+        completed: true,
+        observation: '',
+        result
+      });
+    });
+    students.sort((a, b) => compareLabels(a.studentName, b.studentName));
+    const completedCount = students.filter(student => student.completed).length;
+    return {
+      ...group,
+      students,
+      completedCount,
+      pendingCount: students.length - completedCount,
+      expectedCount: students.length
+    };
+  }).filter(group => !filters.studentKey || group.students.length > 0)
+    .sort((a, b) => b.updatedAtMillis - a.updatedAtMillis || compareLabels(a.examTitle, b.examTitle));
+}
+
+export function buildTeacherActivityGroups(activities = [], studentRecords = [], classes = []) {
+  const approvedStudents = buildTeacherStudentGroups(studentRecords, classes)
+    .flatMap(group => group.students)
+    .filter(student => student.approved);
+  return (activities || []).map(activity => {
+    const expectedStudents = getStudentsForAcademicClass(approvedStudents, activity);
+    const submissionsByAlias = new Map();
+    (activity.submissions || []).forEach(submission => {
+      getSubmissionAliases(submission).forEach(alias => submissionsByAlias.set(alias, submission));
+    });
+    const matchedSubmissionIds = new Set();
+    const students = expectedStudents.map(student => {
+      const submission = getStudentAliases(student).map(alias => submissionsByAlias.get(alias)).find(Boolean) || null;
+      if (submission) matchedSubmissionIds.add(submission.id);
+      return {
+        studentId: student.id,
+        studentName: student.fullName,
+        email: student.email,
+        completed: Boolean(submission),
+        observation: submission ? '' : 'Não realizou a atividade.',
+        submission
+      };
+    });
+    (activity.submissions || []).forEach(submission => {
+      if (matchedSubmissionIds.has(submission.id)) return;
+      students.push({
+        studentId: submission.userId || '',
+        studentName: submission.studentName || submission.userEmail || 'Aluno não identificado',
+        email: submission.userEmail || '',
+        completed: true,
+        observation: '',
+        submission
+      });
+    });
+    students.sort((a, b) => compareLabels(a.studentName, b.studentName));
+    const completedCount = students.filter(student => student.completed).length;
+    return {
+      activity,
+      students,
+      completedCount,
+      pendingCount: students.length - completedCount,
+      expectedCount: students.length
+    };
+  });
 }
