@@ -1998,6 +1998,7 @@ const state = {
   activities: [],
   activitiesStatus: 'idle',
   activitiesMessage: '',
+  selectedTeacherActivityId: null,
   activityUploads: {},
   teacherActivityTitle: '',
   teacherActivityInstructions: '',
@@ -2127,6 +2128,7 @@ auth.onAuthStateChanged(async (user) => {
       state.activities = [];
       state.activitiesStatus = 'idle';
       state.activitiesMessage = '';
+      state.selectedTeacherActivityId = null;
       state.activityUploads = {};
       state.teacherActivityDueAt = '';
       state.teacherActivityResourceFile = null;
@@ -2619,6 +2621,7 @@ window.navigateTo = view => {
   if (view === 'teacher-activity-create' || view === 'teacher-activities' || view === 'student-activities') {
     state.activitiesStatus = 'idle';
     state.activitiesMessage = '';
+    if (view === 'teacher-activities') state.selectedTeacherActivityId = null;
     state.activityUploads = {};
   }
   if (window.location.hash === route) {
@@ -3666,16 +3669,28 @@ function renderActivityResource(activity) {
 
 function renderActivitySubmissionRows(students) {
   if (!students.length) return '<div class="activity-no-submissions">Nenhum aluno aprovado está vinculado a esta turma.</div>';
-  return `<div class="activity-submission-list">${students.map(item => {
+  const renderRows = items => `<div class="activity-submission-list">${items.map(item => {
     const submission = item.submission;
     return `
       <div class="activity-submission-row ${item.completed ? 'completed' : 'missing'}">
         <div><strong>${escapeHtml(item.studentName || 'Aluno')}</strong><small>${escapeHtml(item.email || '')}</small></div>
         ${item.completed
           ? `<div><span>${escapeHtml(submission.fileName)}</span><small>${formatAttachmentSize(submission.size)} · ${formatExamDate(submission.submittedAtMillis)}</small></div><button type="button" class="download-attachment-btn" onclick="window.downloadActivitySubmission('${submission.id}')">Baixar arquivo</button>`
-          : `<div class="student-missing-observation"><strong>Não realizou</strong><small>${escapeHtml(item.observation)}</small></div>`}
+          : `<div class="student-missing-observation"><strong>Observação</strong><small>${escapeHtml(item.observation)}</small></div>`}
       </div>`;
   }).join('')}</div>`;
+  const completed = students.filter(item => item.completed);
+  const missing = students.filter(item => !item.completed);
+  return `<div class="activity-roster-groups">
+    <section class="activity-roster-group completed">
+      <div class="activity-roster-group-heading"><h3>Fizeram a atividade</h3><strong>${completed.length}</strong></div>
+      ${completed.length ? renderRows(completed) : '<div class="activity-no-submissions">Nenhum aluno realizou esta atividade.</div>'}
+    </section>
+    <section class="activity-roster-group missing">
+      <div class="activity-roster-group-heading"><h3>Não fizeram a atividade</h3><strong>${missing.length}</strong></div>
+      ${missing.length ? renderRows(missing) : '<div class="activity-no-submissions">Todos os alunos realizaram esta atividade.</div>'}
+    </section>
+  </div>`;
 }
 
 function renderTeacherActivityCreator() {
@@ -3827,42 +3842,84 @@ function renderTeacherActivityEditor(mainContent) {
   `;
 }
 
+function renderTeacherActivityActions(activity) {
+  const status = getActivityStatus(activity);
+  if (status === ACTIVITY_STATUSES.ARCHIVED) {
+    return '<span class="activity-archived-label">Atividade arquivada · somente consulta</span>';
+  }
+  return `
+    <div class="activity-management-actions">
+      <button type="button" class="secondary-btn" onclick="window.startEditingActivity('${activity.id}')">Editar</button>
+      ${status === ACTIVITY_STATUSES.ACTIVE
+        ? `<button type="button" class="deactivate-exam-btn" onclick="window.deactivateActivity('${activity.id}')">Desativar</button>`
+        : `<button type="button" class="publish-exam-btn" onclick="window.activateActivity('${activity.id}')">Ativar</button>`}
+      <button type="button" class="delete-exam-btn" onclick="window.archiveActivity('${activity.id}')">Arquivar</button>
+    </div>`;
+}
+
 function renderTeacherActivityCard(group) {
   const activity = group.activity;
   const status = getActivityStatus(activity);
   const statusLabel = status === ACTIVITY_STATUSES.ACTIVE
     ? 'Ativa para alunos'
-    : status === ACTIVITY_STATUSES.INACTIVE
-      ? '🔒 Desativada'
-      : 'Arquivada';
-  const actions = status === ACTIVITY_STATUSES.ARCHIVED
-    ? '<span class="activity-archived-label">Somente consulta</span>'
-    : `
-      <div class="activity-management-actions">
-        <button type="button" class="secondary-btn" onclick="window.startEditingActivity('${activity.id}')">Editar</button>
-        ${status === ACTIVITY_STATUSES.ACTIVE
-          ? `<button type="button" class="deactivate-exam-btn" onclick="window.deactivateActivity('${activity.id}')">Desativar</button>`
-          : `<button type="button" class="publish-exam-btn" onclick="window.activateActivity('${activity.id}')">Ativar</button>`}
-        <button type="button" class="delete-exam-btn" onclick="window.archiveActivity('${activity.id}')">Arquivar</button>
-      </div>
-    `;
+    : status === ACTIVITY_STATUSES.INACTIVE ? '🔒 Desativada' : 'Arquivada';
   return `
-    <article class="teacher-activity-card ${status}">
-      <div class="activity-card-topline">
-        <span>${escapeHtml(activity.subjectName)}</span>
-        <div class="activity-status-line"><small>${escapeHtml(activity.className)}</small><span class="exam-status-badge ${status === ACTIVITY_STATUSES.ACTIVE ? 'active' : 'inactive'}">${statusLabel}</span></div>
+    <article class="teacher-activity-card activity-summary-card ${status}" role="button" tabindex="0"
+      onclick="window.openTeacherActivityDetails('${activity.id}')"
+      onkeydown="if (event.target === event.currentTarget && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); window.openTeacherActivityDetails('${activity.id}'); }">
+      <div class="registered-exam-topline">
+        <span class="exam-status-badge ${status === ACTIVITY_STATUSES.ACTIVE ? 'active' : 'inactive'}">${statusLabel}</span>
+        <span class="registered-exam-date">${formatExamDate(activity.updatedAtMillis || activity.createdAtMillis)}</span>
       </div>
       <h3>${escapeHtml(activity.title)}</h3>
-      <p>${escapeHtml(activity.instructions)}</p>
-      ${renderActivityDeadline(activity)}
-      ${renderActivityResource(activity)}
-      <div class="activity-card-actions"><strong>${group.completedCount}/${group.expectedCount} entrega(s) · ${group.pendingCount} pendente(s)</strong>${actions}</div>
-      <details class="activity-student-group">
-        <summary><span>Alunos da atividade</span><strong>Ver situação individual</strong></summary>
-        ${renderActivitySubmissionRows(group.students)}
-      </details>
-    </article>
-  `;
+      <p class="activity-card-preview">${escapeHtml(activity.instructions)}</p>
+      <div class="exam-academic-meta"><span>${escapeHtml(activity.className || 'Turma não informada')}</span><span>${escapeHtml(activity.subjectName || 'Matéria não informada')}</span></div>
+      <div class="activity-card-delivery-summary">
+        <span><strong>${group.completedCount}</strong> fizeram</span>
+        <span class="missing"><strong>${group.pendingCount}</strong> não fizeram</span>
+      </div>
+      <div class="teacher-result-card-footer"><span>${group.expectedCount} aluno(s)</span><strong>Ver alunos e detalhes →</strong></div>
+    </article>`;
+}
+
+function renderTeacherActivityDetails(mainContent, group) {
+  const activity = group.activity;
+  const status = getActivityStatus(activity);
+  const statusLabel = status === ACTIVITY_STATUSES.ACTIVE
+    ? 'Ativa para alunos'
+    : status === ACTIVITY_STATUSES.INACTIVE ? '🔒 Desativada' : 'Arquivada';
+  mainContent.innerHTML = `
+    <section class="exam-page activities-management-page teacher-activity-detail-page">
+      <div class="exam-page-heading results-heading">
+        <div>
+          <span class="eyebrow">Atividade cadastrada</span>
+          <h2>${escapeHtml(activity.title)}</h2>
+          <p>${escapeHtml(activity.className)} · ${escapeHtml(activity.subjectName)}</p>
+        </div>
+        <button class="secondary-btn" onclick="window.closeTeacherActivityDetails()">Voltar às atividades</button>
+      </div>
+      ${state.activitiesMessage ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
+      <article class="teacher-activity-detail ${status}">
+        <div class="activity-detail-topline">
+          <span class="exam-status-badge ${status === ACTIVITY_STATUSES.ACTIVE ? 'active' : 'inactive'}">${statusLabel}</span>
+          <small>Atualizada em ${formatExamDate(activity.updatedAtMillis || activity.createdAtMillis)}</small>
+        </div>
+        <div class="activity-detail-instructions">
+          <span>Orientações</span>
+          <p>${escapeHtml(activity.instructions)}</p>
+        </div>
+        <div class="activity-detail-meta-grid">
+          ${renderActivityDeadline(activity)}
+          ${renderActivityResource(activity)}
+        </div>
+        <div class="activity-detail-actions">${renderTeacherActivityActions(activity)}</div>
+      </article>
+      <div class="activity-roster-heading">
+        <div><span>Situação dos alunos</span><h2>Entregas da atividade</h2></div>
+        <div class="activity-roster-counts"><strong>${group.completedCount} fizeram</strong><span>${group.pendingCount} não fizeram</span></div>
+      </div>
+      ${renderActivitySubmissionRows(group.students)}
+    </section>`;
 }
 
 function renderTeacherActivities() {
@@ -3881,6 +3938,14 @@ function renderTeacherActivities() {
   }
   const activeActivityCount = state.activities.filter(activity => activity.active && !activity.deleted).length;
   const activityGroups = buildTeacherActivityGroups(state.activities, state.teacherStudents, state.academicClasses);
+  const selectedGroup = activityGroups.find(group => group.activity.id === state.selectedTeacherActivityId);
+  if (selectedGroup && state.activitiesStatus !== 'loading' && state.teacherStudentsStatus !== 'loading') {
+    renderTeacherActivityDetails(mainContent, selectedGroup);
+    return;
+  }
+  if (state.selectedTeacherActivityId && state.activitiesStatus === 'ready') {
+    state.selectedTeacherActivityId = null;
+  }
   const content = state.activitiesStatus === 'loading' || state.teacherStudentsStatus === 'loading'
     ? '<div class="exam-loading"><div class="loading-spinner"></div><p>Carregando atividades...</p></div>'
     : state.activitiesStatus === 'error'
@@ -3892,14 +3957,13 @@ function renderTeacherActivities() {
   mainContent.innerHTML = `
     <section class="exam-page activities-management-page">
       <div class="exam-page-heading results-heading">
-        <div><span class="eyebrow">Área do professor</span><h2>Atividades cadastradas</h2><p>Visualize, edite, ative, desative, acompanhe entregas em ZIP ou arquive atividades.</p></div>
+        <div><span class="eyebrow">Área do professor</span><h2>Atividades cadastradas</h2><p>Clique em uma atividade para consultar os alunos que fizeram e os que não fizeram.</p></div>
         <button class="secondary-btn" onclick="window.refreshActivities()">Atualizar lista</button>
       </div>
       ${state.activitiesMessage && state.activitiesStatus !== 'error' ? `<div class="exam-alert ${state.activitiesMessage.startsWith('Erro:') ? 'error' : 'success'}" role="status">${escapeHtml(state.activitiesMessage)}</div>` : ''}
       <div class="hub-section-heading"><div><span>Publicadas</span><h2>Visão geral</h2></div><small>${activeActivityCount} ativa(s) · ${state.activities.length} total</small></div>
       ${content}
-    </section>
-  `;
+    </section>`;
 }
 
 function renderStudentActivityUpload(activity) {
@@ -6299,6 +6363,19 @@ window.submitActivity = async event => {
     state.teacherActivitySubmitting = false;
   }
   renderTeacherActivityCreator();
+};
+
+window.openTeacherActivityDetails = activityId => {
+  if (!state.activities.some(activity => activity.id === activityId)) return;
+  state.selectedTeacherActivityId = activityId;
+  state.activitiesMessage = '';
+  renderTeacherActivities();
+};
+
+window.closeTeacherActivityDetails = () => {
+  state.selectedTeacherActivityId = null;
+  state.activitiesMessage = '';
+  renderTeacherActivities();
 };
 
 window.startEditingActivity = activityId => {
